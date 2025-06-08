@@ -1,0 +1,35 @@
+from setuptools import setup, find_packages
+
+setup(
+    name="llmflow",
+    version="0.1.0",
+    description="A powerful framework for building AI agents based on GAME methodology",
+    author="KazKozDev",
+    author_email="",
+    url="https://github.com/KazKozDev/LLMFlow",
+    packages=find_packages(),
+    install_requires=[
+        'openai>=1.0.0',
+        'requests>=2.20.0',
+        'beautifulsoup4>=4.9.0',
+        'selenium>=4.0.0',
+        'python-dotenv>=0.19.0',
+        'newspaper3k>=0.2.8',
+        'readability-lxml>=0.8.1',
+    ],
+    classifiers=[
+        'Development Status :: 4 - Beta',
+        'Intended Audience :: Developers',
+        'License :: OSI Approved :: MIT License',
+        'Programming Language :: Python :: 3',
+        'Programming Language :: Python :: 3.7',
+        'Programming Language :: Python :: 3.8',
+        'Programming Language :: Python :: 3.9',
+        'Programming Language :: Python :: 3.10',
+        'Topic :: Software Development :: Libraries :: Python Modules',
+        'Topic :: Scientific/Engineering :: Artificial Intelligence',
+    ],
+    python_requires='>=3.7',
+    include_package_data=True,
+    zip_safe=False,
+) 

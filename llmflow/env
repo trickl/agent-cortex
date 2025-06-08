@@ -1,0 +1,74 @@
+# Google Cloud Configuration
+GOOGLE_CREDENTIALS_FILE=credentials.json
+GOOGLE_TOKEN_FILE=token.json
+
+# Email Configuration
+EMAIL_SMTP_SERVER=smtp.gmail.com
+EMAIL_SMTP_PORT=587
+EMAIL_IMAP_SERVER=imap.gmail.com
+EMAIL_IMAP_PORT=993
+EMAIL_POP3_SERVER=pop.gmail.com
+EMAIL_POP3_PORT=995
+EMAIL_USERNAME=your_email@gmail.com
+EMAIL_PASSWORD=your_app_password
+EMAIL_USE_TLS=true
+EMAIL_USE_SSL=false
+
+# Slack Configuration
+SLACK_BOT_TOKEN=xoxb-your-token
+SLACK_APP_TOKEN=xapp-your-token
+SLACK_SIGNING_SECRET=your-signing-secret
+SLACK_OAUTH_TOKEN=xoxp-your-token
+
+# Discord Configuration
+DISCORD_BOT_TOKEN=your-discord-token
+DISCORD_GUILD_ID=your-guild-id
+
+# Telegram Configuration
+TELEGRAM_BOT_TOKEN=your-telegram-token
+TELEGRAM_CHAT_ID=your-chat-id
+TELEGRAM_WEBHOOK_SECRET=your-webhook-secret
+
+# Calendar Configuration
+CALENDAR_PROVIDER=local # google, outlook, caldav, ical, local
+CALENDAR_TIMEZONE=UTC
+CALENDAR_ID=primary
+CALENDAR_SYNC_ENABLED=true
+CALENDAR_CACHE_TTL=300
+CALENDAR_RETRY_ATTEMPTS=3
+CALENDAR_TOKEN_FILE=token.json
+CALENDAR_CREDENTIALS_FILE=credentials.json
+CALENDAR_STORAGE_DIR=./calendar_data
+
+# Exchange/Outlook Calendar
+EXCHANGE_EMAIL=your_email@domain.com
+EXCHANGE_PASSWORD=your_password
+EXCHANGE_SERVER=outlook.office365.com
+
+# CalDAV Calendar
+CALDAV_URL=https://your-caldav-server/dav/
+CALDAV_USERNAME=your_username
+CALDAV_PASSWORD=your_password
+
+# OpenAI Configuration
+OPENAI_API_KEY=YOUR_OPENAI_API_KEY
+
+# Speech Recognition Configuration
+GOOGLE_SPEECH_API_KEY=your-google-speech-api-key
+AZURE_SPEECH_KEY=your-azure-speech-key
+AZURE_SPEECH_REGION=your-azure-region
+WHISPER_MODEL=base # tiny, base, small, medium, large
+
+# SQL Database Configuration
+SQL_DATABASE_TYPE=sqlite # sqlite, postgresql, mysql, oracle, mssql
+SQL_CONNECTION_STRING=sqlite:///database.db
+SQL_POOL_SIZE=5
+SQL_MAX_OVERFLOW=10
+SQL_POOL_TIMEOUT=30
+SQL_POOL_RECYCLE=3600
+
+# Vector Database Configuration
+VECTOR_DB_TYPE=faiss # faiss, annoy, chroma, simple
+VECTOR_DB_PATH=./vector_db
+VECTOR_DB_DIMENSION=384
+VECTOR_DB_METRIC=cosine # cosine, euclidean, dot_product, manhattan 
