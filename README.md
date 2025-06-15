@@ -18,7 +18,7 @@ The Agent is responsible for managing the overall flow of interactions, coordina
 The architecture follows the state machine (or more generally, process automaton) principle, where the system is always aware of its current state and the possible transitions. Each layer — Input, Goals, Memory, Actions, Environment, Feedback, Output — represents a logical processing stage. Transitions occur both within layers (e.g. Goal Planning → Subgoal Planning) and between layers (e.g. Feedback influencing Memory to trigger a new cycle).
   
 ### Capabilities
-  - OpenAI API support (GPT-4o, GPT-4o-mini)
+  - OpenAI API support (GPT-4o-mini)
   - Generic provider support for custom LLMs
   - Automatic tool registration and discovery
   - Error handling and recovery
