@@ -8,6 +8,7 @@ provider_config:
 #   provider: "generic"
 #   endpoint: "http://your-api-endpoint"
 #   api_key: ""  # Set in environment variables
+#   tool_capable: true  # Confirm the upstream API emits OpenAI-style tool_calls
 #   headers:
 #     Content-Type: "application/json"
 #   payload_template:
@@ -19,3 +20,14 @@ provider_config:
 #     content_path: ["choices", 0, "message", "content"]
 #     error_path: ["error", "message"]
 #     tool_calls_path: ["choices", 0, "message", "tool_calls"] 
+
+# Example for local Ollama configuration:
+# provider_config:
+#   provider: "ollama"
+#   model: "llama3.1"   # Or any model you have pulled via `ollama pull`
+#   base_url: "http://localhost:11434"  # Optional if using the default
+#   options:
+#     temperature: 0.4
+#     num_ctx: 8192
+#   # On startup the client will send a probe tool call; the model must respond with
+#   # OpenAI-style tool_calls or the agent initialization will fail fast.

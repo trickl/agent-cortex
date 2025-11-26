@@ -17,6 +17,7 @@ while maintaining proper communication format between the LLM and tools.
 """
 
 import json
+from uuid import uuid4
 from typing import List, Dict, Callable, Any, Optional
 
 # Tooling - to get the actual function to execute
@@ -52,16 +53,48 @@ class ActionHandler:
 
         action_requests = []
         for call in tool_calls:
-            if not isinstance(call, dict) or call.get("type") != "function":
-                print(f"Warning: Skipping invalid tool call object (not a dict or type is not function): {call}")
-                continue
-            
-            func_spec = call.get("function")
-            if not isinstance(func_spec, dict) or "name" not in func_spec or "arguments" not in func_spec:
-                print(f"Warning: Skipping invalid function specification in tool call: {func_spec}")
+            if not isinstance(call, dict):
+                print(f"Warning: Skipping invalid tool call object (not a dict): {call}")
                 continue
 
-            action_requests.append(call) # Store the original tool_call structure
+            func_spec = call.get("function")
+            if not isinstance(func_spec, dict):
+                print(f"Warning: Skipping tool call due to missing function spec: {call}")
+                continue
+
+            func_name = func_spec.get("name")
+            if not func_name:
+                print(f"Warning: Tool call missing function name: {call}")
+                continue
+
+            arguments_payload = func_spec.get("arguments", {})
+            if isinstance(arguments_payload, (dict, list)):
+                try:
+                    arguments_payload = json.dumps(arguments_payload)
+                except (TypeError, ValueError) as exc:
+                    print(
+                        f"Warning: Could not serialize arguments for tool '{func_name}': {exc}. Skipping call."
+                    )
+                    continue
+            elif arguments_payload is None:
+                arguments_payload = "{}"
+            elif not isinstance(arguments_payload, str):
+                arguments_payload = json.dumps(arguments_payload)
+
+            normalized_call = {
+                "id": call.get("id") or f"auto_call_{uuid4().hex}",
+                "type": call.get("type") or "function",
+                "function": {
+                    "name": func_name,
+                    "arguments": arguments_payload,
+                },
+            }
+
+            if normalized_call["type"] != "function":
+                print(f"Warning: Unsupported tool call type '{normalized_call['type']}'. Skipping call {call}.")
+                continue
+
+            action_requests.append(normalized_call)
         return action_requests
 
     def execute_tool_calls(self, tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

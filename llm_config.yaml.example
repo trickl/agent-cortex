@@ -1,0 +1,36 @@
+# Copy this file to `llm_config.yaml` and adjust the provider section you want to use.
+
+provider_config:
+  provider: "openai"
+  api_key: "YOUR_OPENAI_API_KEY"  # or set OPENAI_API_KEY as an environment variable
+  model: "gpt-4o-mini"
+
+# --- Local Ollama Example ----------------------------------------------------
+# provider_config:
+#   provider: "ollama"
+#   model: "llama3.1"          # any model pulled via `ollama pull`
+#   base_url: "http://localhost:11434"
+#   options:
+#     temperature: 0.4
+#     num_ctx: 8192
+#   # The client sends a dummy tool call during startup; if the model does not
+#   # reply with tool_calls the initialization fails immediately.
+
+# --- Generic HTTP Gateway Example -------------------------------------------
+# provider_config:
+#   provider: "generic"
+#   endpoint: "http://your-api-endpoint"
+#   api_key: ""               # optional; can also come from environment
+#   tool_capable: true         # REQUIRED: upstream must emit OpenAI-style tool_calls
+#   headers:
+#     Content-Type: "application/json"
+#   payload_template:
+#     model: "{{model}}"
+#     messages: "{{messages}}"
+#     stream: false
+#     temperature: 0.7
+#     max_tokens: 1024
+#   response_mapping:
+#     content_path: ["choices", 0, "message", "content"]
+#     error_path: ["error", "message"]
+#     tool_calls_path: ["choices", 0, "message", "tool_calls"]

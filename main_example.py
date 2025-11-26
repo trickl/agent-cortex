@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 from llmflow.core.agent import Agent
 from llmflow.llm_client import LLMClient
-import llmflow.tools
+from llmflow.tools import load_all_tools
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -24,6 +24,7 @@ if current_script_dir not in sys.path:
 def run_interactive_chat(model_name: str = "gpt-4", max_iterations: int = 0):
     """Runs an interactive chat session with the AI agent."""
     load_dotenv()
+    load_all_tools()
 
     print(f"Using LLM Model: {model_name}")
     print("Initializing LLMClient...")

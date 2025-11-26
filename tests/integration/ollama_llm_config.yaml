@@ -1,0 +1,7 @@
+provider_config:
+  provider: "ollama"
+  model: "granite4:3b"
+  base_url: "http://localhost:11434"
+  options:
+    temperature: 0.2
+    num_ctx: 4096

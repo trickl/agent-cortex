@@ -19,6 +19,8 @@ from collections import deque, defaultdict
 import statistics
 import platform
 
+LOGGER = logging.getLogger(__name__)
+
 # Import LLMFlow registration decorator
 from .tool_decorator import register_tool
 
@@ -28,7 +30,9 @@ try:
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
-    print("Warning: psutil not available. Some monitoring features will be limited.")
+    LOGGER.debug(
+        "psutil not available during tool import. Monitoring tools will warn when invoked."
+    )
 
 try:
     import matplotlib.pyplot as plt
@@ -654,8 +658,15 @@ class SystemMonitor:
             }
         }
 
-# Initialize global monitor
-system_monitor = SystemMonitor()
+# Initialize global monitor lazily
+_SYSTEM_MONITOR: Optional[SystemMonitor] = None
+
+
+def _get_system_monitor() -> SystemMonitor:
+    global _SYSTEM_MONITOR
+    if _SYSTEM_MONITOR is None:
+        _SYSTEM_MONITOR = SystemMonitor()
+    return _SYSTEM_MONITOR
 
 # Registered tool functions
 @register_tool(tags=["system", "monitoring", "metrics", "current"])
@@ -667,7 +678,7 @@ def get_current_system_metrics() -> Dict[str, Any]:
         Dictionary with current system metrics
     """
     try:
-        metrics = system_monitor.get_current_metrics()
+        metrics = _get_system_monitor().get_current_metrics()
         return {
             'status': 'success',
             'timestamp': metrics.timestamp.isoformat(),
@@ -697,7 +708,7 @@ def get_detailed_resource_usage() -> Dict[str, Any]:
     Returns:
         Dictionary with detailed resource usage information
     """
-    return system_monitor.get_resource_usage()
+    return _get_system_monitor().get_resource_usage()
 
 @register_tool(tags=["system", "monitoring", "processes", "top"])
 def get_top_processes(limit: int = 10, sort_by: str = 'cpu') -> Dict[str, Any]:
@@ -711,7 +722,7 @@ def get_top_processes(limit: int = 10, sort_by: str = 'cpu') -> Dict[str, Any]:
     Returns:
         Dictionary with top processes information
     """
-    return system_monitor.get_top_processes(limit=limit, sort_by=sort_by)
+    return _get_system_monitor().get_top_processes(limit=limit, sort_by=sort_by)
 
 @register_tool(tags=["system", "monitoring", "start", "continuous"])
 def start_system_monitoring(interval: int = 5) -> Dict[str, Any]:
@@ -724,7 +735,7 @@ def start_system_monitoring(interval: int = 5) -> Dict[str, Any]:
     Returns:
         Dictionary with monitoring start result
     """
-    return system_monitor.start_monitoring(interval=interval)
+    return _get_system_monitor().start_monitoring(interval=interval)
 
 @register_tool(tags=["system", "monitoring", "stop", "continuous"])
 def stop_system_monitoring() -> Dict[str, Any]:
@@ -734,7 +745,7 @@ def stop_system_monitoring() -> Dict[str, Any]:
     Returns:
         Dictionary with monitoring stop result
     """
-    return system_monitor.stop_monitoring()
+    return _get_system_monitor().stop_monitoring()
 
 @register_tool(tags=["system", "monitoring", "summary", "statistics"])
 def get_monitoring_summary(hours: int = 1) -> Dict[str, Any]:
@@ -747,7 +758,7 @@ def get_monitoring_summary(hours: int = 1) -> Dict[str, Any]:
     Returns:
         Dictionary with monitoring summary statistics
     """
-    return system_monitor.get_metrics_summary(hours=hours)
+    return _get_system_monitor().get_metrics_summary(hours=hours)
 
 @register_tool(tags=["system", "monitoring", "alerts", "add"])
 def add_system_alert(name: str, metric: str, condition: str, 
@@ -765,7 +776,7 @@ def add_system_alert(name: str, metric: str, condition: str,
     Returns:
         Dictionary with alert rule creation result
     """
-    return system_monitor.add_alert_rule(
+    return _get_system_monitor().add_alert_rule(
         name=name,
         metric=metric,
         condition=condition,
@@ -781,7 +792,7 @@ def list_system_alerts() -> Dict[str, Any]:
     Returns:
         Dictionary with list of alert rules
     """
-    return system_monitor.list_alert_rules()
+    return _get_system_monitor().list_alert_rules()
 
 @register_tool(tags=["system", "monitoring", "info", "system"])
 def get_comprehensive_system_info() -> Dict[str, Any]:
@@ -791,7 +802,7 @@ def get_comprehensive_system_info() -> Dict[str, Any]:
     Returns:
         Dictionary with comprehensive system information
     """
-    return system_monitor.get_system_info()
+    return _get_system_monitor().get_system_info()
 
 @register_tool(tags=["system", "monitoring", "stats", "monitoring"])
 def get_monitoring_statistics() -> Dict[str, Any]:
@@ -801,7 +812,7 @@ def get_monitoring_statistics() -> Dict[str, Any]:
     Returns:
         Dictionary with monitoring statistics
     """
-    return system_monitor.get_monitoring_stats()
+    return _get_system_monitor().get_monitoring_stats()
 
 @register_tool(tags=["system", "monitoring", "health", "check"])
 def system_health_check() -> Dict[str, Any]:
@@ -812,7 +823,7 @@ def system_health_check() -> Dict[str, Any]:
         Dictionary with system health status and recommendations
     """
     try:
-        metrics = system_monitor.get_current_metrics()
+        metrics = _get_system_monitor().get_current_metrics()
         
         # Health assessment
         health_issues = []
@@ -878,15 +889,15 @@ def analyze_system_performance() -> Dict[str, Any]:
         Dictionary with performance analysis
     """
     try:
-        if len(system_monitor.metrics_history) < 10:
+        if len(_get_system_monitor().metrics_history) < 10:
             return {
                 'status': 'insufficient_data',
                 'message': 'Need at least 10 data points for analysis',
-                'current_snapshots': len(system_monitor.metrics_history)
+                'current_snapshots': len(_get_system_monitor().metrics_history)
             }
         
         # Get recent metrics
-        recent_metrics = list(system_monitor.metrics_history)[-50:]  # Last 50 snapshots
+        recent_metrics = list(_get_system_monitor().metrics_history)[-50:]  # Last 50 snapshots
         
         # Calculate trends
         cpu_values = [m.cpu_percent for m in recent_metrics]

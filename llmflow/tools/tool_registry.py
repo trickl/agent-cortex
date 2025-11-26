@@ -1,8 +1,15 @@
-"""
-Provides functions to access and manage registered tools.
-"""
-from typing import List, Dict, Any, Callable, Optional
+"""Provides functions to access and manage registered tools."""
+
 import json
+import logging
+from typing import Any, Callable, Dict, List, Optional
+
+from llmflow.tools import (
+    get_module_for_tool_name,
+    get_modules_for_tags,
+    load_all_tools,
+    load_tool_module,
+)
 
 # Import the global registries from tool_decorator
 # This creates a circular dependency if tool_decorator imports tool_registry.
@@ -24,6 +31,52 @@ import json
 
 # To make this module self-contained for now, let's try to get them from tool_decorator.
 # This implies that tool_decorator must have been imported for this to work.
+_TOOLS_FULLY_LOADED = False
+LOGGER = logging.getLogger(__name__)
+
+
+def _load_modules_for_tags(tags: Optional[List[str]], match_all: bool) -> None:
+    global _TOOLS_FULLY_LOADED
+    if _TOOLS_FULLY_LOADED:
+        return
+    if not tags:
+        load_all_tools()
+        _TOOLS_FULLY_LOADED = True
+        return
+
+    module_candidates = get_modules_for_tags(tags, match_all)
+    if not module_candidates:
+        LOGGER.debug(
+            "No tool modules matched tags %s (match_all=%s); importing all tools as fallback.",
+            tags,
+            match_all,
+        )
+        load_all_tools()
+        _TOOLS_FULLY_LOADED = True
+        return
+
+    for module_name in module_candidates:
+        load_tool_module(module_name)
+
+
+def _ensure_tool_loaded_by_name(tool_name: str) -> None:
+    global _TOOLS_FULLY_LOADED
+    if not tool_name or tool_name in _tool_registry or _TOOLS_FULLY_LOADED:
+        return
+
+    module_name = get_module_for_tool_name(tool_name)
+    if module_name:
+        load_tool_module(module_name)
+        return
+
+    LOGGER.debug(
+        "Unknown tool '%s' not present in metadata; importing all tool modules as fallback.",
+        tool_name,
+    )
+    load_all_tools()
+    _TOOLS_FULLY_LOADED = True
+
+
 try:
     from .tool_decorator import _tool_registry, _tool_tags, register_tool
 except ImportError:
@@ -36,22 +89,26 @@ except ImportError:
 
 def get_tool_function(tool_name: str) -> Optional[Callable[..., Any]]:
     """Retrieves the callable function for a given tool name."""
+    _ensure_tool_loaded_by_name(tool_name)
     tool_info = _tool_registry.get(tool_name)
     return tool_info["function"] if tool_info else None
 
 def get_tool_schema(tool_name: str) -> Optional[Dict[str, Any]]:
     """Retrieves the JSON schema for a given tool name."""
+    _ensure_tool_loaded_by_name(tool_name)
     tool_info = _tool_registry.get(tool_name)
     return tool_info["schema"] if tool_info else None
 
 def get_tool_description(tool_name: str) -> Optional[str]:
     """Retrieves the full docstring description for a given tool name."""
+    _ensure_tool_loaded_by_name(tool_name)
     tool_info = _tool_registry.get(tool_name)
     return tool_info["description"] if tool_info else None
 
 def get_tool_tags(tool_name: str) -> Optional[List[str]]:
     """Retrieves the tags for a given tool name."""
     # Tags are now stored directly in _tool_registry per tool
+    _ensure_tool_loaded_by_name(tool_name)
     tool_info = _tool_registry.get(tool_name)
     return tool_info["tags"] if tool_info else None
 
@@ -60,6 +117,10 @@ def get_all_tools_schemas(tags: Optional[List[str]] = None) -> List[Dict[str, An
 
     If tags are provided, only tools matching ALL provided tags are returned.
     """
+    if tags:
+        _load_modules_for_tags(tags, match_all=True)
+    else:
+        _load_modules_for_tags(tags=None, match_all=True)
     schemas = []
     for tool_name, tool_info in _tool_registry.items():
         if tags:
@@ -81,6 +142,7 @@ def get_tools_by_tags(tags: List[str], match_all: bool = True) -> Dict[str, Dict
     Returns:
         A dictionary where keys are tool names and values are their full registry entries.
     """
+    _load_modules_for_tags(tags, match_all)
     if not tags: # Return all tools if no tags are specified
         return dict(_tool_registry)
         
@@ -99,6 +161,7 @@ def list_available_tools(verbose: bool = False) -> List[str]:
     """Returns a list of names of all registered tools.
     If verbose, prints details of each tool.
     """
+    _load_modules_for_tags(tags=None, match_all=True)
     if not _tool_registry:
         print("No tools are currently registered.")
         return []

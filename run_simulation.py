@@ -16,7 +16,7 @@ if project_root not in sys.path:
 
 from llmflow.core.agent import Agent
 from llmflow.llm_client import LLMClient
-import llmflow.tools # To ensure tools are registered
+from llmflow.tools import load_all_tools
 from llmflow.tools.tool_registry import list_available_tools, get_all_tools_schemas
 
 # Configure basic logging
@@ -59,6 +59,7 @@ def run_agent_simulation():
     """Runs a predefined agent simulation based on a configuration file."""
     load_dotenv() # Load .env for API keys
     config = load_simulation_config()
+    load_all_tools()
 
     print("--- AGENT SIMULATION START ---")
     

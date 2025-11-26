@@ -3,11 +3,13 @@ Decorator for easily registering tools and generating their JSON schema.
 """
 import inspect
 import json
+import logging
 from typing import Callable, Dict, Any, List, get_type_hints, Union, Optional
 
 # These are global registries. In a more complex application, you might wrap them in a class.
 _tool_registry: Dict[str, Dict[str, Any]] = {}
 _tool_tags: Dict[str, List[str]] = {} # Stores tool_name -> list_of_tags
+LOGGER = logging.getLogger(__name__)
 
 def register_tool(tags: Optional[List[str]] = None, terminal: bool = False):
     """A decorator to register a function as an agent tool and generate its schema.
@@ -26,7 +28,7 @@ def register_tool(tags: Optional[List[str]] = None, terminal: bool = False):
 
         tool_name = func.__name__
         if tool_name in _tool_registry:
-            print(f"Warning: Tool '{tool_name}' is already registered. Overwriting.")
+            LOGGER.warning("Tool '%s' is already registered. Overwriting.", tool_name)
 
         docstring = inspect.getdoc(func)
         if not docstring:
@@ -35,7 +37,7 @@ def register_tool(tags: Optional[List[str]] = None, terminal: bool = False):
         docstring_lines = docstring.strip().split('\n', 1)
         summary = docstring_lines[0]
 
-        type_hints = get_type_hints(func) # Get type hints for the function
+        type_hints = get_type_hints(func) # Get evaluated type hints (handles future annotations)
         parameters_schema: Dict[str, Any] = {"type": "object", "properties": {}, "required": []}
         
         sig = inspect.signature(func)
@@ -44,19 +46,17 @@ def register_tool(tags: Optional[List[str]] = None, terminal: bool = False):
             if param_name == 'self' or param_name == 'cls': # Skip self/cls for methods
                 continue
 
-            if param.annotation is inspect.Parameter.empty:
-                # Check type_hints as a fallback, though signature is usually more reliable for functions
-                if param_name not in type_hints:
-                    raise ValueError(f"Argument '{param_name}' in tool '{tool_name}' is missing a type hint.")
-                arg_type = type_hints[param_name]
-            else:
-                arg_type = param.annotation
+            arg_type = type_hints.get(param_name, param.annotation)
+            if arg_type is inspect.Parameter.empty:
+                raise ValueError(
+                    f"Argument '{param_name}' in tool '{tool_name}' is missing a type hint."
+                )
             
             param_schema = _map_type_to_json_schema(arg_type, tool_name, param_name)
             
             parameters_schema["properties"][param_name] = param_schema
             if param.default is inspect.Parameter.empty:
-                 parameters_schema["required"].append(param_name)
+                parameters_schema["required"].append(param_name)
         
         if not parameters_schema["required"] and parameters_schema["properties"]:
             del parameters_schema["required"] 
@@ -125,15 +125,28 @@ def _map_type_to_json_schema(py_type: Any, tool_name: str, arg_name: str) -> Dic
             type_names = ", ".join(str(t) for t in non_none_args)
             description_addition = f" (Value can be one of: {type_names}. Schema shown for {non_none_args[0]}.)"
             first_type_schema["description"] = first_type_schema.get("description", "") + description_addition
-            print(f"Warning: Union type for {arg_name} in {tool_name}. Mapped to first type ({non_none_args[0]}) with extended description.")
+            LOGGER.debug(
+                "Union type for %s in %s mapped to first type (%s) with extended description.",
+                arg_name,
+                tool_name,
+                non_none_args[0],
+            )
             return first_type_schema
         else:
             raise ValueError(f"Argument '{arg_name}' in tool '{tool_name}' has a Union type with only NoneType, which is not valid.")
     elif py_type is Any:
         return {"description": "Any value is permissible."}
     else:
-        print(f"Warning: Unsupported type '{py_type}' for argument '{arg_name}' in tool '{tool_name}'. Defaulting to string with original type in description.")
-        return {"type": "string", "description": f"Represents a '{str(py_type)}' type. Provide as a string if unsure or if it's a complex object."}
+        LOGGER.debug(
+            "Unsupported type '%s' for argument '%s' in tool '%s'. Defaulting to string.",
+            py_type,
+            arg_name,
+            tool_name,
+        )
+        return {
+            "type": "string",
+            "description": f"Represents a '{str(py_type)}' type. Provide as a string if unsure or if it's a complex object.",
+        }
 
 
 if __name__ == '__main__':

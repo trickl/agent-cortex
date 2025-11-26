@@ -22,7 +22,7 @@ import calendar
 import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from typing import List, Dict
+from typing import Dict, List, Type
 
 import requests
 from pydantic import BaseModel, Field, ValidationError, conint
@@ -173,6 +173,15 @@ class MonthInput(_BaseInput):
     query: str | None = ""
 
 
+def _model_schema(model_cls: Type[BaseModel]) -> Dict[str, object]:
+    """Return the JSON schema for a Pydantic model without emitting V2 warnings."""
+
+    if hasattr(model_cls, "model_json_schema"):
+        return model_cls.model_json_schema()
+    # Fallback for older Pydantic versions.
+    return model_cls.schema()
+
+
 def _tool_wrapper(input_cls, fn):
     def _inner(raw: str) -> str:  # JSON → markdown
         try:
@@ -249,22 +258,22 @@ functions = [
     {
         "name": "arxiv_search_topic_tool",
         "description": "Search arXiv by general topic / keywords",
-        "parameters": TopicInput.schema(),
+        "parameters": _model_schema(TopicInput),
     },
     {
         "name": "arxiv_search_author_tool",
         "description": "Search arXiv for papers by an author, optionally filtered by topic",
-        "parameters": AuthorInput.schema(),
+        "parameters": _model_schema(AuthorInput),
     },
     {
         "name": "arxiv_search_year_tool",
         "description": "Search arXiv for papers published in a specific year",
-        "parameters": YearInput.schema(),
+        "parameters": _model_schema(YearInput),
     },
     {
         "name": "arxiv_search_month_tool",
         "description": "Search arXiv for papers from a specific month (YYYY-MM)",
-        "parameters": MonthInput.schema(),
+        "parameters": _model_schema(MonthInput),
     },
 ]
 

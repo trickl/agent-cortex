@@ -1,0 +1,29 @@
+[tool.black]
+line-length = 79
+target-version = ["py310"]
+include = "\\.pyi?$"
+exclude = '''
+/(\.eggs|\.git|\.hg|\.mypy_cache|\.nox|\.tox|\.venv|_build|buck-out|build|dist|venv)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 79
+known_first_party = ["llmflow"]
+combine_as_imports = true
+force_grid_wrap = 0
+include_trailing_comma = true
+multi_line_output = 3
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra -m 'not include_integration_test'"
+testpaths = [
+    "tests"
+]
+pythonpath = [
+    "."
+]
+markers = [
+    "include_integration_test: opt-in mark for live LLM tests (run with -m include_integration_test)",
+]

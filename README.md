@@ -45,13 +45,45 @@ pip install -r requirements.txt
    ```bash
    cp llm_config.yaml.example llm_config.yaml
    ```
-2. Configure your LLM:
+2. Configure your preferred provider in `llm_config.yaml`:
+
+   **OpenAI (hosted)**
    ```yaml
    provider_config:
      provider: "openai"
-     api_key: "your-api-key"  # Or use OPENAI_API_KEY env var
+     api_key: "YOUR_OPENAI_API_KEY"   # or set OPENAI_API_KEY in the environment
      model: "gpt-4o-mini"
    ```
+
+   **Local Ollama**
+   ```yaml
+   provider_config:
+     provider: "ollama"
+     model: "llama3.1"           # any model you have pulled via `ollama pull`
+     base_url: "http://localhost:11434"  # default, can be omitted
+     options:
+       temperature: 0.4
+       num_ctx: 8192
+   ```
+   > ℹ️  During startup the client sends a dummy tool request to Ollama and aborts if the model fails to return OpenAI-style `tool_calls`. Only run with models that explicitly support the tool-calling protocol.
+
+   **Custom / Generic Gateway**
+   ```yaml
+   provider_config:
+     provider: "generic"
+     endpoint: "http://your-api-endpoint"
+      tool_capable: true         # REQUIRED: upstream must emit tool_calls
+     headers:
+       Content-Type: "application/json"
+     payload_template:
+       model: "{{model}}"
+       messages: "{{messages}}"
+     response_mapping:
+       content_path: ["choices", 0, "message", "content"]
+   ```
+  Fill in `api_key`, payload, and response mapping fields to match the upstream API. The `tool_capable` flag is mandatory so the client can fail fast when the upstream service cannot return tool calls.
+
+Regardless of provider, the agent always enables tool/function calling. Initialization fails immediately if the selected model cannot emit OpenAI-style `tool_calls`, preventing silent fallbacks.
 
 #### Environment Variables
 1. Copy the example env file:
@@ -316,10 +348,35 @@ Below is the complete list of available tools:
 </details>
 
 ## Development Guidelines
-- Follow PEP 8 style guide
+- Follow PEP 8 style guide (see `coding-style.md` for the project-specific summary used by humans and GitHub Copilot)
 - Add tests for new features
 - Update documentation
 - Maintain backward compatibility
+
+### Linting, Formatting, and Tests
+Install the optional development dependencies and register the Git hooks:
+
+```bash
+pip install -r requirements-dev.txt
+pre-commit install
+```
+
+The hooks automatically enforce:
+
+- **Formatting:** `black` (line length 79) and `isort` (Black profile) keep code layout and imports deterministic.
+- **Linting:** `pylint` guards naming, complexity, and safety rules captured in `coding-style.md`.
+- **Testing:** `pytest` runs against everything in `tests/` to catch regressions before pushing.
+
+Run the suite manually before opening a pull request:
+
+```bash
+black .
+isort .
+pylint llmflow
+pytest
+```
+
+`pre-commit` blocks commits that fail formatting, linting, or tests, which keeps quality gates consistent across contributors and automation.
 
 ---
 
