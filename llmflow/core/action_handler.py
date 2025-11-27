@@ -18,10 +18,100 @@ while maintaining proper communication format between the LLM and tools.
 
 import json
 from uuid import uuid4
-from typing import List, Dict, Callable, Any, Optional
+from typing import List, Dict, Callable, Any, Optional, Tuple, Mapping
 
 # Tooling - to get the actual function to execute
 from llmflow.tools.tool_registry import get_tool_function, get_tool_schema
+
+_ERROR_HINT_FIELDS = ("error", "message", "detail", "details", "reason")
+_FATAL_EXCEPTION_TYPES = (
+    ModuleNotFoundError,
+    ImportError,
+    PermissionError,
+    FileNotFoundError,
+    NotADirectoryError,
+)
+_RETRYABLE_EXCEPTION_TYPES = (TimeoutError, ConnectionError)
+
+
+def _default_metadata() -> Dict[str, Any]:
+    return {"success": True, "retryable": True, "fatal": False, "error": None}
+
+
+def _merge_metadata_from_mapping(metadata: Dict[str, Any], payload: Mapping[str, Any]) -> Tuple[bool, bool]:
+    success_explicit = False
+    retryable_explicit = False
+
+    if "success" in payload:
+        metadata["success"] = bool(payload["success"])
+        success_explicit = True
+
+    if "retryable" in payload:
+        metadata["retryable"] = bool(payload["retryable"])
+        retryable_explicit = True
+
+    if "fatal" in payload:
+        metadata["fatal"] = bool(payload["fatal"])
+
+    for field in _ERROR_HINT_FIELDS:
+        if field in payload and payload[field]:
+            metadata["error"] = str(payload[field])
+            if not success_explicit:
+                metadata["success"] = False
+            break
+
+    return success_explicit, retryable_explicit
+
+
+def _normalize_tool_result_payload(payload: Any) -> Tuple[str, Dict[str, Any]]:
+    metadata = _default_metadata()
+    success_explicit = False
+    retryable_explicit = False
+
+    if isinstance(payload, str):
+        content_str = payload
+        stripped = payload.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                parsed = json.loads(payload)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, Mapping):
+                success_flag, retry_flag = _merge_metadata_from_mapping(metadata, parsed)
+                success_explicit = success_explicit or success_flag
+                retryable_explicit = retryable_explicit or retry_flag
+    elif isinstance(payload, (dict, list, tuple)):
+        try:
+            content_str = json.dumps(payload)
+        except TypeError:
+            content_str = str(payload)
+        if isinstance(payload, Mapping):
+            success_flag, retry_flag = _merge_metadata_from_mapping(metadata, payload)
+            success_explicit = success_explicit or success_flag
+            retryable_explicit = retryable_explicit or retry_flag
+    else:
+        content_str = str(payload)
+
+    if metadata["fatal"]:
+        metadata["success"] = False
+        metadata["retryable"] = False
+    elif not metadata["success"] and not retryable_explicit:
+        metadata["retryable"] = False
+    elif metadata["success"] and not retryable_explicit:
+        metadata["retryable"] = True
+
+    if metadata["error"] is None and not metadata["success"]:
+        metadata["error"] = content_str[:500] if content_str else "Unknown error"
+
+    return content_str, metadata
+
+
+def _classify_exception(exc: Exception) -> Dict[str, bool]:
+    fatal = isinstance(exc, _FATAL_EXCEPTION_TYPES)
+    retryable = isinstance(exc, _RETRYABLE_EXCEPTION_TYPES)
+    if fatal:
+        retryable = False
+    return {"fatal": fatal, "retryable": retryable}
 
 class ActionHandler:
     """Parses LLM tool calls and executes them via the tool registry."""
@@ -116,11 +206,19 @@ class ActionHandler:
 
             if not tool_call_id or not tool_name or arguments_str is None: # arguments_str can be empty string for no-arg functions
                 print(f"Warning: Skipping tool call due to missing id, name, or arguments: {tool_call_item}")
+                error_payload = {
+                    "success": False,
+                    "error": "Malformed tool call received by ActionHandler.",
+                    "details": "Missing id, name, or arguments.",
+                    "retryable": False,
+                }
+                content_str, metadata = _normalize_tool_result_payload(error_payload)
                 results.append({
-                    "role": "tool", 
-                    "tool_call_id": tool_call_id or "unknown_id", 
+                    "role": "tool",
+                    "tool_call_id": tool_call_id or "unknown_id",
                     "name": tool_name or "unknown_tool",
-                    "content": json.dumps({"error": "Malformed tool call received by ActionHandler.", "details": "Missing id, name, or arguments."})
+                    "content": content_str,
+                    "metadata": metadata,
                 })
                 continue
 
@@ -132,11 +230,19 @@ class ActionHandler:
                 if not tool_function:
                     error_msg = f"Tool '{tool_name}' not found in registry."
                     print(f"Error: {error_msg}")
+                    error_payload = {
+                        "success": False,
+                        "error": error_msg,
+                        "fatal": True,
+                        "retryable": False,
+                    }
+                    content_str, metadata = _normalize_tool_result_payload(error_payload)
                     results.append({
-                        "role": "tool", 
-                        "tool_call_id": tool_call_id, 
-                        "name": tool_name, 
-                        "content": json.dumps({"error": error_msg})
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "name": tool_name,
+                        "content": content_str,
+                        "metadata": metadata,
                     })
                     continue
 
@@ -153,21 +259,37 @@ class ActionHandler:
                 except json.JSONDecodeError as e_json:
                     error_msg = f"Invalid JSON arguments for tool '{tool_name}': {arguments_str}. Error: {e_json}"
                     print(f"Error: {error_msg}")
+                    error_payload = {
+                        "success": False,
+                        "error": "Invalid JSON in arguments.",
+                        "details": error_msg,
+                        "retryable": False,
+                    }
+                    content_str, metadata = _normalize_tool_result_payload(error_payload)
                     results.append({
-                        "role": "tool", 
-                        "tool_call_id": tool_call_id, 
-                        "name": tool_name, 
-                        "content": json.dumps({"error": "Invalid JSON in arguments.", "details": error_msg})
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "name": tool_name,
+                        "content": content_str,
+                        "metadata": metadata,
                     })
                     continue
                 except TypeError as e_type:
                     error_msg = f"Arguments for tool '{tool_name}' did not parse to a dictionary: {arguments_str}. Error: {e_type}"
                     print(f"Error: {error_msg}")
+                    error_payload = {
+                        "success": False,
+                        "error": "Arguments not a dictionary.",
+                        "details": error_msg,
+                        "retryable": False,
+                    }
+                    content_str, metadata = _normalize_tool_result_payload(error_payload)
                     results.append({
-                        "role": "tool", 
-                        "tool_call_id": tool_call_id, 
-                        "name": tool_name, 
-                        "content": json.dumps({"error": "Arguments not a dictionary.", "details": error_msg})
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "name": tool_name,
+                        "content": content_str,
+                        "metadata": metadata,
                     })
                     continue
 
@@ -180,41 +302,35 @@ class ActionHandler:
                     print(f"[ActionHandler] Executing tool: {tool_name} with args {args_dict}")
                     action_result = tool_function(**args_dict)
 
-                # Ensure result is JSON serializable (string or dict/list that can be dumped)
-                # Tools should ideally return str or Dict/List.
-                if not isinstance(action_result, (str, dict, list, tuple, int, float, bool, type(None))):
-                    print(f"Warning: Tool '{tool_name}' returned a non-standard type: {type(action_result)}. Attempting to convert to string.")
-                    try:
-                        action_result_str = str(action_result)
-                    except Exception as e_str_conv:
-                        print(f"Error converting complex tool result for '{tool_name}' to string: {e_str_conv}")
-                        action_result_str = json.dumps({"error": f"Result from tool '{tool_name}' is not directly JSON serializable and str() conversion failed.", "type": str(type(action_result))})
-                elif isinstance(action_result, (dict, list, tuple)):
-                     # Try to dump to JSON string if it's a collection, to ensure it's one item for 'content'
-                    try:
-                        action_result_str = json.dumps(action_result)
-                    except TypeError as e_json_dump:
-                        print(f"Error serializing result of tool '{tool_name}' to JSON: {e_json_dump}. Falling back to str().")
-                        action_result_str = str(action_result)
-                else: # Simple types like str, int, float, bool, None
-                    action_result_str = str(action_result) # str() handles None to "None"
-                
+                action_result_str, metadata = _normalize_tool_result_payload(action_result)
+
                 results.append({
-                    "role": "tool", 
-                    "tool_call_id": tool_call_id, 
-                    "name": tool_name, 
-                    "content": action_result_str, # Store the potentially JSON stringified result
-                    "is_terminal": is_terminal_tool # Pass terminal status along
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "name": tool_name,
+                    "content": action_result_str,
+                    "is_terminal": is_terminal_tool,
+                    "metadata": metadata,
                 })
 
             except Exception as e:
                 error_msg = f"Error executing tool '{tool_name}': {str(e)}"
                 print(f"Error: {error_msg}")
+                classification = _classify_exception(e)
+                error_payload = {
+                    "success": False,
+                    "error": error_msg,
+                    "exception_type": e.__class__.__name__,
+                    "retryable": classification["retryable"],
+                    "fatal": classification["fatal"],
+                }
+                content_str, metadata = _normalize_tool_result_payload(error_payload)
                 results.append({
-                    "role": "tool", 
-                    "tool_call_id": tool_call_id, 
-                    "name": tool_name, 
-                    "content": json.dumps({"error": error_msg, "exception_type": e.__class__.__name__})
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "name": tool_name,
+                    "content": content_str,
+                    "metadata": metadata,
                 })
         return results
 

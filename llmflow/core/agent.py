@@ -24,6 +24,7 @@ maintain coherent conversations while working towards specific goals.
 """
 
 import json
+import time
 from typing import List, Dict, Any, Optional
 
 # LLM Client
@@ -38,19 +39,23 @@ from .environment import Environment
 # Tooling
 from llmflow.tools.tool_registry import get_all_tools_schemas, get_tools_by_tags
 
-# Removed old LLMProvider, OpenAILikeLLM, OllamaProvider from here
-
 class Agent:
     """The AI Agent that uses Goals, Actions (Tools), Memory, and Environment."""
-    def __init__(self, 
-                 llm_client: LLMClient, # Changed from llm_provider
-                 system_prompt: str = "You are a helpful AI assistant. You have access to tools. Be clear about tool usage. When a user asks for information that might require searching the web (e.g., news, facts, etc.): \\\\n1. First, use a search tool to find relevant URLs and their snippets. \\\\n2. Then, analyze the search results. If appropriate, use a web parsing tool to fetch content from one or more of the most relevant URLs. \\\\n3. Finally, synthesize the gathered information and provide a comprehensive answer or summary to the user. If you parse content, mention the source URLs.",
-                 initial_goals: Optional[List[Dict[str, Any]]] = None,
-                 available_tool_tags: Optional[List[str]] = None,
-                 match_all_tags: bool = True,
-                 max_iterations: Optional[int] = 10, # Allow None for unlimited
-                 verbose: bool = True
-                 ):
+
+    _MAX_CONTEXT_TRACE = 100
+
+    def __init__(
+        self,
+        llm_client: LLMClient,  # Changed from llm_provider
+        system_prompt: str = "You are a helpful AI assistant. You have access to tools. Be clear about tool usage. When a user asks for information that might require searching the web (e.g., news, facts, etc.): \\\\n+1. First, use a search tool to find relevant URLs and their snippets. \\\\n+2. Then, analyze the search results. If appropriate, use a web parsing tool to fetch content from one or more of the most relevant URLs. \\\\n+3. Finally, synthesize the gathered information and provide a comprehensive answer or summary to the user. If you parse content, mention the source URLs.",
+        initial_goals: Optional[List[Dict[str, Any]]] = None,
+        available_tool_tags: Optional[List[str]] = None,
+        match_all_tags: bool = True,
+        max_iterations: Optional[int] = 10,  # Allow None for unlimited
+        verbose: bool = True,
+        llm_max_retries: int = 2,
+        llm_retry_delay: float = 2.0,
+    ):
         self.llm_client = llm_client # Changed from llm_provider
         self.goal_manager = GoalManager(initial_goals=initial_goals)
         self.memory = Memory(system_prompt=system_prompt)
@@ -61,10 +66,13 @@ class Agent:
         self.match_all_tags_for_tools = match_all_tags
         self.verbose = verbose
         self.active_tools_schemas: List[Dict[str, Any]] = []
+        self.context_trace: List[Dict[str, Any]] = []
         self._load_active_tools()
 
         self.max_iterations = max_iterations
         self.current_iteration = 0
+        self.llm_max_retries = max(0, llm_max_retries)
+        self.llm_retry_delay = max(0.0, llm_retry_delay)
 
         if self.verbose:
             print("Agent initialized with LLMClient.")
@@ -75,6 +83,9 @@ class Agent:
                 print(f"Max Iterations: {self.max_iterations}")
             self.goal_manager.get_goals_for_prompt()
             print(f"Loaded {len(self.active_tools_schemas)} tools for the agent.")
+            print(
+                f"LLM retry policy: {self.llm_max_retries} retries with base delay {self.llm_retry_delay:.1f}s."
+            )
 
     def _load_active_tools(self):
         """Loads tool schemas based on specified tags."""
@@ -122,6 +133,108 @@ class Agent:
             messages.append({"role": "user", "content": f"--- Review Current Goals ---\\n{current_goals_text}\\n--- End of Goals ---"})
             
         return messages
+
+    def _record_context_snapshot(
+        self,
+        stage: str,
+        messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        snapshot = messages if messages is not None else self.memory.get_history()
+        msg_count = len(snapshot)
+        approx_chars = sum(
+            len(str(msg.get("content", "")))
+            for msg in snapshot
+            if isinstance(msg, dict)
+        )
+        tool_messages = sum(
+            1 for msg in snapshot if isinstance(msg, dict) and msg.get("role") == "tool"
+        )
+        entry = {
+            "stage": stage,
+            "message_count": msg_count,
+            "approx_chars": approx_chars,
+            "tool_messages": tool_messages,
+            "timestamp": time.time(),
+        }
+        self.context_trace.append(entry)
+        if len(self.context_trace) > self._MAX_CONTEXT_TRACE:
+            self.context_trace.pop(0)
+        if self.verbose:
+            print(
+                f"[context] {stage}: {msg_count} msgs, ~{approx_chars} chars, {tool_messages} tool msgs."
+            )
+
+    def get_context_trace(self) -> List[Dict[str, Any]]:
+        """Return a copy of the recent context trace for diagnostics."""
+
+        return list(self.context_trace)
+
+    def _call_llm_with_retries(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+    ) -> Dict[str, Any]:
+        attempts = 0
+        last_error: Optional[str] = None
+        max_attempts = self.llm_max_retries + 1
+
+        while attempts < max_attempts:
+            try:
+                response = self.llm_client.generate(messages=messages, tools=tools)
+            except Exception as exc:  # pragma: no cover - defensive
+                last_error = f"LLM invocation raised {exc.__class__.__name__}: {exc}"
+            else:
+                if isinstance(response, dict):
+                    content = response.get("content")
+                    if (
+                        response.get("role") == "assistant"
+                        and isinstance(content, str)
+                        and content.strip().startswith("Error:")
+                    ):
+                        last_error = content
+                    else:
+                        return response
+                else:
+                    last_error = f"Unexpected LLM response type: {type(response)}"
+
+            attempts += 1
+            if attempts < max_attempts:
+                delay = self.llm_retry_delay * max(attempts, 1)
+                if self.verbose:
+                    print(
+                        f"LLM call failed (attempt {attempts}/{self.llm_max_retries}). "
+                        f"Retrying in {delay:.1f}s..."
+                    )
+                if delay > 0:
+                    time.sleep(delay)
+
+        raise RuntimeError(last_error or "LLM call failed without additional details.")
+
+    def _summarize_tool_failure(
+        self,
+        tool_name: Optional[str],
+        metadata: Dict[str, Any],
+        fallback_content: Optional[str] = None,
+    ) -> Dict[str, Optional[str]]:
+        name = tool_name or "unknown_tool"
+        severity = "fatal" if metadata.get("fatal") else ("retryable" if metadata.get("retryable", False) else "non-retryable")
+        reason = metadata.get("error") or (fallback_content[:200] if fallback_content else "Unknown error")
+        note = (
+            f"[observation] Tool '{name}' reported a {severity} failure: {reason}."
+        )
+
+        if metadata.get("fatal"):
+            note += " Terminating the current run."
+        elif metadata.get("retryable", False):
+            note += " The error may be transient; consider retrying with adjusted parameters."
+        else:
+            note += " Please adjust the plan, arguments, or choose a different tool before continuing."
+
+        user_message = None
+        if metadata.get("fatal"):
+            user_message = f"Unable to continue because tool '{name}' encountered a fatal error: {reason}."
+
+        return {"note": note, "user_message": user_message}
 
     def _check_completion(self) -> bool:
         """Checks if the agent's goals are completed or max iterations reached."""
@@ -173,18 +286,26 @@ class Agent:
                     content_summary = str(msg.get('content', ''))[:100].replace('\\n', ' ') + "..."
                     tool_calls_summary = msg.get('tool_calls') if msg.get('tool_calls') else ''
                     print(f"  {msg['role']}: {content_summary} {tool_calls_summary}")
+                approx_chars = sum(len(str(msg.get('content', ''))) for msg in llm_messages if isinstance(msg, dict))
+                print(f"Context stats: {len(llm_messages)} messages, ~{approx_chars} content characters.")
+
+            self._record_context_snapshot("pre_llm_prompt", llm_messages)
 
             if self.verbose: print("Querying LLM via LLMClient...")
             
-            # Call the new LLMClient's generate method
-            # The LLMClient is expected to return a dict like:
-            # {"role": "assistant", "content": "...", "tool_calls": [...]} or error content
-            llm_response = self.llm_client.generate(
-                messages=llm_messages, 
-                tools=self.active_tools_schemas if self.active_tools_schemas else None
-                # temperature, max_tokens, etc., can be passed as kwargs if needed,
-                # or rely on defaults in llm_config.yaml / LLMClient
-            )
+            try:
+                llm_response = self._call_llm_with_retries(
+                    llm_messages,
+                    self.active_tools_schemas if self.active_tools_schemas else None,
+                )
+            except RuntimeError as exc:
+                final_agent_message = (
+                    "Unable to continue because the language model request failed repeatedly: "
+                    f"{exc}"
+                )
+                print(final_agent_message)
+                self.memory.add_assistant_message(content=final_agent_message)
+                break
             
             # The new LLMClient directly returns the assistant message object (or an error structure)
             assistant_message_obj = llm_response 
@@ -198,10 +319,11 @@ class Agent:
                 break 
 
             if "Error:" in str(assistant_message_obj.get("content")) and assistant_message_obj.get("role") == "assistant":
-                 print(f"LLMClient reported an error: {assistant_message_obj.get('content')}")
-                 # Add error content to memory as assistant message
-                 self.memory.add_assistant_message(content=assistant_message_obj.get("content"), tool_calls=None)
-                 break # Stop processing this turn if LLM had an error
+                error_text = assistant_message_obj.get("content")
+                print(f"LLMClient reported an error: {error_text}")
+                self.memory.add_assistant_message(content=error_text, tool_calls=None)
+                final_agent_message = error_text
+                break  # Stop processing this turn if LLM had an error
 
             self.memory.add_assistant_message(content=assistant_message_obj.get("content"),
                                             tool_calls=assistant_message_obj.get("tool_calls"))
@@ -229,10 +351,26 @@ class Agent:
                     if res_dict.get("role") == "tool":
                         self.memory.add_tool_result_message(
                             tool_call_id=res_dict["tool_call_id"],
-                            result=res_dict["content"],
+                            result=res_dict.get("content"),
                             function_name=res_dict.get("name")
                         )
                         if self.verbose: print(f"  Added tool result: {res_dict.get('name') or res_dict['tool_call_id']} -> {str(res_dict['content'])[:100]}...")
+
+                        metadata = res_dict.get("metadata") or {}
+                        tool_failed = not metadata.get("success", True)
+                        if tool_failed:
+                            summary = self._summarize_tool_failure(
+                                res_dict.get("name"), metadata, res_dict.get("content")
+                            )
+                            note = summary.get("note")
+                            if note:
+                                if self.verbose:
+                                    print(f"  Controller note: {note}")
+                                self.memory.add_assistant_message(content=note)
+                            if metadata.get("fatal"):
+                                should_terminate_agent = True
+                                final_agent_message = summary.get("user_message") or note
+                                break
                         
                         # Check for terminal tool execution
                         if res_dict.get("is_terminal", False):
@@ -274,11 +412,14 @@ class Agent:
                 
                 if should_terminate_agent:
                     break # Break from the main while loop
+
+                self._record_context_snapshot("post_iteration_state")
             else:
                 if self.verbose: print("No tool calls from LLM. Agent response is the content.")
                 # If LLM provided content, that's the response for this iteration.
                 # If the agent is not meant to continue after a direct textual response, this `break` is correct.
                 final_agent_message = assistant_message_obj.get("content") # Capture LLM direct response as potential final message if no tools were called
+                self._record_context_snapshot("post_iteration_state")
                 break 
 
         if self.verbose:

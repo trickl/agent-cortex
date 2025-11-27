@@ -11,6 +11,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
+from urllib.parse import urlparse
 
 try:  # pragma: no cover - exercised indirectly in tests
     from git import Actor as GitActor, Repo as GitRepo
@@ -32,6 +33,58 @@ except ImportError:  # pragma: no cover
 from llmflow.tools.tool_decorator import register_tool
 
 _TOOL_TAGS = ["git", "devops", "version_control"]
+
+
+def _extract_repo_slug(repo_url: str) -> Optional[str]:
+    trimmed = repo_url.strip()
+    if not trimmed:
+        return None
+    trimmed = trimmed.rstrip("/")
+    if trimmed.endswith(".git"):
+        trimmed = trimmed[:-4]
+    if trimmed.startswith("git@") and ":" in trimmed:
+        _, remainder = trimmed.split(":", 1)
+        return remainder.strip("/") or None
+    parsed = urlparse(trimmed)
+    if parsed.scheme:
+        path = parsed.path.strip("/")
+        if path:
+            return path
+    if "/" in trimmed:
+        return trimmed.strip("/")
+    return trimmed or None
+
+
+def _slug_to_subpath(slug: Optional[str]) -> Path:
+    if not slug:
+        return Path("repository")
+    parts = [part for part in slug.split("/") if part and part not in (".", "..")]
+    return Path(*parts) if parts else Path("repository")
+
+
+def _resolve_clone_destination(repo_url: str, destination: Optional[str]) -> Path:
+    repo_root_env = os.getenv("PROJECT_REPO_ROOT")
+    if repo_root_env:
+        root_path = Path(repo_root_env).expanduser().resolve()
+        root_path.mkdir(parents=True, exist_ok=True)
+        if destination:
+            dest_path = Path(destination)
+            if dest_path.is_absolute():
+                relative_subpath = _slug_to_subpath(_extract_repo_slug(repo_url))
+            else:
+                relative_subpath = dest_path
+        else:
+            relative_subpath = _slug_to_subpath(_extract_repo_slug(repo_url))
+        target_dir = (root_path / relative_subpath).resolve()
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        return target_dir
+
+    if destination:
+        target_dir = Path(destination).expanduser().resolve()
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        return target_dir
+
+    return Path(tempfile.mkdtemp(prefix="llmflow-git-"))
 
 
 def _failure(message: str) -> Dict[str, Any]:
@@ -90,11 +143,7 @@ def git_clone_repository(
 
     try:
         _require_git()
-        target_dir = (
-            Path(destination).expanduser().resolve()
-            if destination
-            else Path(tempfile.mkdtemp(prefix="llmflow-git-"))
-        )
+        target_dir = _resolve_clone_destination(repo_url, destination)
         clone_kwargs = {}
         if depth:
             clone_kwargs["depth"] = depth

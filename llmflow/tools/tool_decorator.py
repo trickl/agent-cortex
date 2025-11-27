@@ -8,8 +8,9 @@ from typing import Callable, Dict, Any, List, get_type_hints, Union, Optional
 
 # These are global registries. In a more complex application, you might wrap them in a class.
 _tool_registry: Dict[str, Dict[str, Any]] = {}
-_tool_tags: Dict[str, List[str]] = {} # Stores tool_name -> list_of_tags
+_tool_tags: Dict[str, List[str]] = {}  # Stores tool_name -> list_of_tags
 LOGGER = logging.getLogger(__name__)
+
 
 def register_tool(tags: Optional[List[str]] = None, terminal: bool = False):
     """A decorator to register a function as an agent tool and generate its schema.
@@ -22,6 +23,7 @@ def register_tool(tags: Optional[List[str]] = None, terminal: bool = False):
         tags (Optional[List[str]]): A list of tags to categorize the tool.
         terminal (bool): If True, indicates that calling this tool should terminate the agent's current run.
     """
+
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         global _tool_registry
         global _tool_tags
@@ -33,17 +35,17 @@ def register_tool(tags: Optional[List[str]] = None, terminal: bool = False):
         docstring = inspect.getdoc(func)
         if not docstring:
             raise ValueError(f"Tool function '{tool_name}' must have a docstring for its description.")
-        
+
         docstring_lines = docstring.strip().split('\n', 1)
         summary = docstring_lines[0]
 
-        type_hints = get_type_hints(func) # Get evaluated type hints (handles future annotations)
+        type_hints = get_type_hints(func)  # Get evaluated type hints (handles future annotations)
         parameters_schema: Dict[str, Any] = {"type": "object", "properties": {}, "required": []}
-        
+
         sig = inspect.signature(func)
-        
+
         for param_name, param in sig.parameters.items():
-            if param_name == 'self' or param_name == 'cls': # Skip self/cls for methods
+            if param_name == 'self' or param_name == 'cls':  # Skip self/cls for methods
                 continue
 
             arg_type = type_hints.get(param_name, param.annotation)
@@ -51,15 +53,15 @@ def register_tool(tags: Optional[List[str]] = None, terminal: bool = False):
                 raise ValueError(
                     f"Argument '{param_name}' in tool '{tool_name}' is missing a type hint."
                 )
-            
+
             param_schema = _map_type_to_json_schema(arg_type, tool_name, param_name)
-            
+
             parameters_schema["properties"][param_name] = param_schema
             if param.default is inspect.Parameter.empty:
                 parameters_schema["required"].append(param_name)
-        
+
         if not parameters_schema["required"] and parameters_schema["properties"]:
-            del parameters_schema["required"] 
+            del parameters_schema["required"]
         elif not parameters_schema["properties"]:
             parameters_schema = {"type": "object", "properties": {}}
 
@@ -67,16 +69,16 @@ def register_tool(tags: Optional[List[str]] = None, terminal: bool = False):
             "type": "function",
             "function": {
                 "name": tool_name,
-                "description": summary, 
+                "description": summary,
                 "parameters": parameters_schema,
             }
         }
-        
+
         current_tags = list(set(tags)) if tags else []
         _tool_registry[tool_name] = {
             "schema": tool_schema,
             "function": func,
-            "description": docstring, 
+            "description": docstring,
             "tags": current_tags,
             "terminal": terminal
         }
@@ -85,7 +87,9 @@ def register_tool(tags: Optional[List[str]] = None, terminal: bool = False):
         _tool_tags[tool_name] = current_tags
 
         return func
+
     return decorator
+
 
 def _map_type_to_json_schema(py_type: Any, tool_name: str, arg_name: str) -> Dict[str, Any]:
     """Maps Python types to JSON schema type definitions."""
@@ -106,21 +110,15 @@ def _map_type_to_json_schema(py_type: Any, tool_name: str, arg_name: str) -> Dic
             return {"type": "array", "items": item_schema}
         return {"type": "array", "items": {"description": "Items of the list. Type not specified."}}
     elif py_type is dict or origin is dict:
-        if args and len(args) == 2: # Handles Dict[KeyType, ValueType]
-            # key_type_schema = _map_type_to_json_schema(args[0], tool_name, f"{arg_name} keys")
+        if args and len(args) == 2:  # Handles Dict[KeyType, ValueType]
             value_type_schema = _map_type_to_json_schema(args[1], tool_name, f"{arg_name} values")
-            # JSON schema for objects doesn't directly map Python dict key types other than string.
-            # additionalProperties is used for the schema of the values.
             return {"type": "object", "additionalProperties": value_type_schema}
         return {"type": "object", "additionalProperties": True}
-    elif origin is Union: 
+    elif origin is Union:
         non_none_args = [arg for arg in args if arg is not type(None)]
         if len(non_none_args) == 1:
             return _map_type_to_json_schema(non_none_args[0], tool_name, arg_name)
         elif len(non_none_args) > 1:
-            # For Union[A, B], create a schema that lists possible types in description.
-            # OpenAI tools typically expect a single type, or 'anyOf' can be used if supported by the model/API.
-            # Picking the first type and augmenting its description is a common workaround.
             first_type_schema = _map_type_to_json_schema(non_none_args[0], tool_name, arg_name)
             type_names = ", ".join(str(t) for t in non_none_args)
             description_addition = f" (Value can be one of: {type_names}. Schema shown for {non_none_args[0]}.)"
@@ -133,7 +131,9 @@ def _map_type_to_json_schema(py_type: Any, tool_name: str, arg_name: str) -> Dic
             )
             return first_type_schema
         else:
-            raise ValueError(f"Argument '{arg_name}' in tool '{tool_name}' has a Union type with only NoneType, which is not valid.")
+            raise ValueError(
+                f"Argument '{arg_name}' in tool '{tool_name}' has a Union type with only NoneType, which is not valid."
+            )
     elif py_type is Any:
         return {"description": "Any value is permissible."}
     else:
@@ -147,6 +147,14 @@ def _map_type_to_json_schema(py_type: Any, tool_name: str, arg_name: str) -> Dic
             "type": "string",
             "description": f"Represents a '{str(py_type)}' type. Provide as a string if unsure or if it's a complex object.",
         }
+
+
+def get_registered_tools() -> Dict[str, Dict[str, Any]]:
+    return _tool_registry
+
+
+def get_registered_tags() -> Dict[str, List[str]]:
+    return _tool_tags
 
 
 if __name__ == '__main__':
@@ -169,7 +177,7 @@ if __name__ == '__main__':
     @register_tool(tags=["file_system", "write", "example_tool"])
     def write_to_file_example(file_path: str, text_content: str, mode: Optional[str] = "w") -> Dict[str, Any]:
         """Writes text content to a specified file (EXAMPLE IMPLEMENTATION).
-        
+
         Simulates writing to a file. Supports different write modes.
         Args:
             file_path: The path of the file to write to.
@@ -216,7 +224,7 @@ if __name__ == '__main__':
         return ts
 
     @register_tool(tags=["test_complex_types", "example_tool"])
-    def process_complex_data_example(config: Dict[str, Union[int, str]], items: Optional[List[Dict[str, Any]]]=None) -> bool:
+    def process_complex_data_example(config: Dict[str, Union[int, str]], items: Optional[List[Dict[str, Any]]] = None) -> bool:
         """Processes complex data structures (EXAMPLE IMPLEMENTATION).
         Args:
             config: A configuration dictionary with string keys and int or string values.
@@ -233,7 +241,6 @@ if __name__ == '__main__':
         print(f"\nTool: {tool_name}")
         print(f"  Tags: {tool_data['tags']}")
         print(f"  Description (Summary): {tool_data['schema']['function']['description']}")
-        # print(f"  Full Description: {tool_data['description']}") # Full docstring
         print(f"  Schema: {json.dumps(tool_data['schema'], indent=2)}")
 
     print("\n--- Tags Information (_tool_tags mapping) ---")
@@ -243,5 +250,4 @@ if __name__ == '__main__':
     print("\n--- Schemas List for LLM API ---")
     print(json.dumps(llm_tools_list, indent=2))
 
-    print(f"\nSchema for process_complex_data: {json.dumps(_tool_registry['process_complex_data']['schema'], indent=2)}")
- 
+    print(f"\nSchema for process_complex_data: {json.dumps(_tool_registry['process_complex_data_example']['schema'], indent=2)}")

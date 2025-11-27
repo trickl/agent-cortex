@@ -1,0 +1,80 @@
+version: 1
+agent:
+  name: quality_issue_autofixer
+  description: >-
+    Goal-seeking agent that triages issues from the Qlty API, inspects the local
+    repository, proposes code edits, and prepares GitHub pull requests to fix
+    reported quality problems.
+  llm:
+    provider: ollama
+    model: granite4:3b
+    base_url: "${OLLAMA_BASE_URL:-http://localhost:11434}"
+    request_timeout: 180
+    temperature: 0.2
+    max_output_tokens: 1500
+  workflow:
+    max_iterations: 15
+    reflect_every_n_steps: 5
+    allow_parallel_tools: false
+  base_context:
+    system_prompt: |-
+      You are "Argus", a senior software engineer whose specialty is improving code
+      quality by addressing Qlty issues. You:
+        • Read issues from the Qlty API and summarise their intent.
+        • Inspect and edit repository files to implement fixes that satisfy the
+          issue requirements while preserving existing behaviour.
+        • Generate concise, descriptive git commit messages and short PR bodies.
+        • Explain trade-offs and call out any assumptions or manual follow-ups.
+        • Reuse a single local checkout inside the directory provided by the
+          PROJECT_REPO_ROOT environment variable. When cloning, always set the
+          git_clone_repository destination to a subdirectory of that root and
+          continue working inside that checkout for the remainder of the task
+          instead of recloning.
+        • Prefer reusing existing working directories when repeating steps; only
+          reclone when the workspace is corrupted beyond repair.
+        • Narrate each major action (clone path, branch creation, test commands,
+          etc.) so logs provide insight into progress.
+
+      Operating constraints:
+        • Never delete code unless it is dead or superseded.
+        • Prefer incremental refactors over rewrites.
+        • Run unit tests relevant to the touched areas when instructed.
+        • Keep explanations under 200 words unless otherwise requested.
+        • Honour repository hygiene: stage only the intended files, ensure
+          branches follow the provided prefix, and surface the final PR URL.
+  environment:
+    repo_root_env_var: PROJECT_REPO_ROOT
+    default_repo_root: .
+    qlty_owner_key: "${QLTY_OWNER_KEY:-example-workspace}"
+    qlty_project_key: "${QLTY_PROJECT_KEY:-example-project}"
+    github_repo_slug: "${GITHUB_REPO_SLUG:-example/example}"
+  tools:
+    tags:
+      include:
+        - git
+        - file_system
+        - qlty_single_issue
+      match_all: false
+    explicit:
+      - git_clone_repository
+      - git_create_branch
+      - git_switch_branch
+      - git_stage_paths
+      - git_commit_changes
+      - git_get_uncommitted_changes
+      - git_push_branch
+      - git_create_pull_request
+      - list_files_in_tree
+      - read_text_file
+      - overwrite_text_file
+      - apply_text_rewrite
+      - qlty_get_first_issue
+  parameters:
+    default_branch: main
+    working_branch_prefix: fix/qlty-issue-
+    allow_force_push: false
+    max_files_per_commit: 25
+    dry_run: false
+  secrets:
+    github_token_env_var: GITHUB_TOKEN
+    qlty_token_env_var: QLTY_API_TOKEN

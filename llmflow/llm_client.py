@@ -26,6 +26,7 @@ class LLMClient:
 
         provider_name = provider_config.get("provider", "").lower()
         self.provider = self._build_provider(provider_name, provider_config)
+        self.default_request_timeout = provider_config.get("request_timeout")
         self.provider.validate_tool_support()
 
     def _load_config(self, file_path: str) -> Dict[str, Any]:
@@ -85,6 +86,8 @@ class LLMClient:
             self.provider.__class__.__name__,
             current_model,
         )
+        if "timeout" not in kwargs and self.default_request_timeout:
+            kwargs["timeout"] = self.default_request_timeout
         return self.provider.generate_response(
             messages=messages,
             model=current_model,
