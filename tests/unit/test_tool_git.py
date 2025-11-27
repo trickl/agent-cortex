@@ -1,8 +1,18 @@
 """Unit tests for git tool helpers."""
 
+from pathlib import Path
+
 import pytest
 
 from llmflow.tools import tool_git
+
+try:  # pragma: no cover - helper import for git-specific tests
+    from git import Repo
+
+    _GIT_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    Repo = None  # type: ignore
+    _GIT_AVAILABLE = False
 
 
 @pytest.fixture(autouse=True)
@@ -47,3 +57,67 @@ def test_resolve_clone_destination_without_env(monkeypatch, tmp_path):
 
     assert resolved == target.resolve()
     assert resolved.parent == target.parent.resolve()
+
+
+def _init_git_repo(repo_path: Path) -> str:
+    if not _GIT_AVAILABLE:  # pragma: no cover - safety for environments without gitpython
+        pytest.skip("GitPython is required for git_suggest_branch_name tests")
+    repo_path.mkdir(parents=True, exist_ok=True)
+    repo = Repo.init(repo_path)
+    readme = repo_path / "README.md"
+    readme.write_text("test repo", encoding="utf-8")
+    repo.index.add([str(readme)])
+    repo.index.commit("initial commit")
+    return str(repo_path)
+
+
+def test_git_create_branch_fails_when_exists(tmp_path):
+    repo_dir = tmp_path / "repo"
+    repo_path = _init_git_repo(repo_dir)
+    repo = Repo(repo_path)
+    repo.create_head("existing-branch")
+
+    result = tool_git.git_create_branch(
+        repo_path=repo_path,
+        branch_name="existing-branch",
+    )
+
+    assert result["success"] is False
+    assert "already exists" in result["error"].lower()
+
+
+def test_git_suggest_branch_name_includes_issue_slug(tmp_path):
+    repo_dir = tmp_path / "repo"
+    repo_path = _init_git_repo(repo_dir)
+
+    result = tool_git.git_suggest_branch_name(
+        repo_path=repo_path,
+        issue_reference="Lint Issue ABC-123",
+    )
+
+    assert result["success"] is True
+    assert result["branch_name"].startswith("fix/issue-")
+    assert "lint-issue-abc-123" in result["branch_name"]
+    assert result["was_modified"] is False
+
+
+def test_git_suggest_branch_name_handles_collisions(tmp_path):
+    repo_dir = tmp_path / "repo"
+    repo_path = _init_git_repo(repo_dir)
+    repo = Repo(repo_path)
+
+    initial = tool_git.git_suggest_branch_name(
+        repo_path=repo_path,
+        issue_reference="Lint Issue ABC-123",
+    )
+    assert initial["success"] is True
+    repo.create_head(initial["branch_name"])  # occupy the base branch name
+
+    second = tool_git.git_suggest_branch_name(
+        repo_path=repo_path,
+        issue_reference="Lint Issue ABC-123",
+    )
+
+    assert second["success"] is True
+    assert second["branch_name"].endswith("-1")
+    assert second["was_modified"] is True

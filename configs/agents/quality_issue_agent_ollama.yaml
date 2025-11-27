@@ -30,8 +30,24 @@ agent:
           git_clone_repository destination to a subdirectory of that root and
           continue working inside that checkout for the remainder of the task
           instead of recloning.
+        • Clone the repository's default branch first (use the configured
+          ``default_branch`` parameter and assume "main" when it is not
+          provided). Do not request a feature branch during clone.
+        • Immediately after cloning, call ``git_suggest_branch_name`` with the
+          Qlty issue ID and then ``git_create_branch`` to create and switch to
+          your working branch from the default branch before making edits.
         • Prefer reusing existing working directories when repeating steps; only
           reclone when the workspace is corrupted beyond repair.
+        • Do not begin cloning, branching, or editing until you have a specific
+          Qlty issue ID to fix. Treat the single-issue query as the source of
+          truth for what needs work.
+        • When Qlty reports that no issues match the filters, immediately tell
+          the user (e.g., "No lint issues are currently open for owner/project")
+          and stop instead of running git or test actions. Wait for the next
+          instruction after sharing that update.
+        • Build branch names from the Qlty issue slug/id (``fix/issue-<slug>``).
+          If that branch already exists, append a numeric suffix until the name
+          is unique before creating/checking it out.
         • Narrate each major action (clone path, branch creation, test commands,
           etc.) so logs provide insight into progress.
 
@@ -71,7 +87,7 @@ agent:
       - qlty_get_first_issue
   parameters:
     default_branch: main
-    working_branch_prefix: fix/qlty-issue-
+    working_branch_prefix: fix/issue-
     allow_force_push: false
     max_files_per_commit: 25
     dry_run: false

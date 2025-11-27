@@ -8,6 +8,7 @@ opening pull requests—so agents can manage source control tasks end-to-end.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -33,6 +34,9 @@ except ImportError:  # pragma: no cover
 from llmflow.tools.tool_decorator import register_tool
 
 _TOOL_TAGS = ["git", "devops", "version_control"]
+
+_INVALID_BRANCH_CHARS = re.compile(r"[^0-9a-zA-Z._/-]+")
+_DUPLICATE_SEPARATORS = re.compile(r"[._/-]{2,}")
 
 
 def _extract_repo_slug(repo_url: str) -> Optional[str]:
@@ -60,6 +64,22 @@ def _slug_to_subpath(slug: Optional[str]) -> Path:
         return Path("repository")
     parts = [part for part in slug.split("/") if part and part not in (".", "..")]
     return Path(*parts) if parts else Path("repository")
+
+
+def _slugify_branch_component(value: Optional[str]) -> str:
+    if not value:
+        return "update"
+    text = str(value).strip().lower()
+    if not text:
+        return "update"
+    text = text.replace(" ", "-")
+    text = text.replace(":", "-")
+    text = text.replace("/", "-")
+    text = text.replace("\\", "-")
+    text = _INVALID_BRANCH_CHARS.sub("-", text)
+    text = _DUPLICATE_SEPARATORS.sub("-", text)
+    text = text.strip("./-")
+    return text or "update"
 
 
 def _resolve_clone_destination(repo_url: str, destination: Optional[str]) -> Path:
@@ -175,12 +195,9 @@ def git_create_branch(
         repo = _resolve_repo(repo_path)
         heads_by_name = {head.name: head for head in repo.branches}
         if branch_name in heads_by_name:
-            repo.git.checkout(branch_name)
-            return {
-                "success": True,
-                "branch": branch_name,
-                "message": "Branch already existed; checked out.",
-            }
+            return _failure(
+                f"Branch '{branch_name}' already exists. Choose a different name."
+            )
 
         base = heads_by_name.get(base_branch, repo.active_branch)
         new_branch = repo.create_head(branch_name, commit=base.commit)
@@ -190,6 +207,46 @@ def git_create_branch(
             "branch": branch_name,
             "base": base.name,
             "commit": new_branch.commit.hexsha,
+        }
+    except Exception as exc:
+        return _failure(str(exc))
+
+
+@register_tool(tags=_TOOL_TAGS)
+def git_suggest_branch_name(
+    repo_path: str,
+    issue_reference: Optional[str] = None,
+    prefix: str = "fix/issue-",
+    max_suffix_attempts: int = 50,
+) -> Dict[str, Any]:
+    """Suggest a unique branch name based on the provided issue reference.
+
+    The helper sanitizes the issue reference (slug/id) into a git-safe component,
+    prefixes it (default ``fix/issue-``), and appends a numeric suffix when the
+    name already exists in the repository.
+    """
+
+    try:
+        repo = _resolve_repo(repo_path)
+        existing = {head.name for head in repo.branches}
+        slug = _slugify_branch_component(issue_reference)
+        base_name = f"{prefix}{slug}"
+        candidate = base_name
+        suffix = 1
+        while candidate in existing and suffix <= max_suffix_attempts:
+            candidate = f"{base_name}-{suffix}"
+            suffix += 1
+
+        if candidate in existing:
+            return _failure(
+                "Unable to find a unique branch name. Consider adjusting the prefix or slug."
+            )
+
+        return {
+            "success": True,
+            "branch_name": candidate,
+            "base_branch_name": base_name,
+            "was_modified": candidate != base_name,
         }
     except Exception as exc:
         return _failure(str(exc))

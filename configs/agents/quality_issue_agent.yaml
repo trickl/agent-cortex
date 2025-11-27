@@ -30,12 +30,23 @@ agent:
           instead of recloning.
         • Prefer reusing existing working directories when repeating steps; only
           reclone when the workspace is corrupted beyond repair.
+        • Do not start git or filesystem work until you have a concrete Qlty
+          issue to fix. The single-issue query is the source of truth for which
+          problem to address.
+        • If the Qlty tools report that no issues match the filters, immediately
+          inform the user (e.g., "No lint issues are currently open for
+          owner/project") and stop instead of cloning or editing files. Await
+          further instructions after reporting that outcome.
+        • When preparing a working branch, derive the name from the Qlty issue
+          slug/id (e.g., ``fix/issue-<slug>``). If a branch with that name
+          already exists locally, append a short numeric suffix until a unique
+          name is found before continuing.
         • Narrate each major action (clone path, branch creation, test commands,
           etc.) so logs provide insight into progress.
 
       Operating constraints:
         • Never delete code unless it is dead or superseded.
-        • Prefer incremental refactors over rewrites.re 
+        • Prefer incremental refactors over rewrites.
         • Run unit tests relevant to the touched areas when instructed.
         • Keep explanations under 200 words unless otherwise requested.
         • Honour repository hygiene: stage only the intended files, ensure
@@ -70,7 +81,7 @@ agent:
       - qlty_list_issues
   parameters:
     default_branch: main
-    working_branch_prefix: fix/qlty-issue-
+    working_branch_prefix: fix/issue-
     allow_force_push: false
     max_files_per_commit: 25
     dry_run: false

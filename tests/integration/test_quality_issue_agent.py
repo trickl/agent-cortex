@@ -113,11 +113,10 @@ def test_quality_issue_agent_closes_first_lint_issue_end_to_end(
     assert agent.max_iterations == workflow.get("max_iterations")
 
     user_prompt = (
-        "Fetch the first open lint issue from Qlty for the project "
-        f"'{owner_key}/{project_key}'. Clone the repository located at {repo_url} (repo slug {repo_slug}) "
-        "using git_clone_repository with repo_url set exactly to that value. Create a working branch, implement the fix "
-        "described by the issue, run relevant tests, stage/commit the changes, push the branch, and open a PR summarizing the fix. "
-        "If no lint issues exist, report that outcome clearly."
+        f"Target owner/project: {owner_key}/{project_key}. "
+        f"Repository URL: {repo_url} (slug {repo_slug}). "
+        "Use your workflow to address the first open lint issue returned by the Qlty tools, "
+        "or state clearly that no lint issues are currently open before stopping."
     )
 
     final_message = agent.add_user_message_and_run(user_prompt)

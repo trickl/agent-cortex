@@ -17,6 +17,69 @@ _TOOL_TAGS = ["qlty", "issues", "project_management"]
 _SINGLE_ISSUE_TAGS = _TOOL_TAGS + ["qlty_single_issue"]
 
 
+def _stringify(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _summarize_issue(issue: Dict[str, Any]) -> str:
+    attributes = issue.get("attributes") or {}
+    identifier = (
+        _stringify(attributes.get("slug"))
+        or _stringify(attributes.get("key"))
+        or _stringify(issue.get("id"))
+    )
+    title = (
+        _stringify(attributes.get("title"))
+        or _stringify(attributes.get("summary"))
+        or _stringify(attributes.get("description"))
+        or "Qlty issue"
+    )
+    level = _stringify(attributes.get("level") or attributes.get("severity"))
+    category = _stringify(attributes.get("category"))
+    rule = _stringify(attributes.get("rule")) or _stringify(attributes.get("ruleName"))
+
+    parts = []
+    if identifier:
+        parts.append(identifier)
+    if level:
+        parts.append(level.upper())
+    if category:
+        parts.append(category)
+    parts.append(title)
+    if rule:
+        parts.append(f"rule {rule}")
+
+    return " | ".join(parts)
+
+
+def _format_filters_summary(
+    owner: str,
+    project: str,
+    categories: Optional[Sequence[str]],
+    statuses: Optional[Sequence[str]],
+    levels: Optional[Sequence[str]],
+    tools: Optional[Sequence[str]],
+) -> str:
+    segments = [f"{owner}/{project}"]
+
+    def _append(label: str, items: Optional[Sequence[str]]) -> None:
+        if not items:
+            return
+        cleaned = [str(item).strip() for item in items if str(item).strip()]
+        if cleaned:
+            segments.append(f"{label}={', '.join(cleaned)}")
+
+    _append("categories", categories)
+    _append("statuses", statuses)
+    _append("levels", levels)
+    _append("tools", tools)
+
+    return "; ".join(segments)
+
+
 def _failure(message: str, status_code: Optional[int] = None) -> Dict[str, Any]:
     payload: Dict[str, Any] = {"success": False, "error": message}
     if status_code is not None:
@@ -65,13 +128,13 @@ def _build_filter_query(
 ) -> Dict[str, Any]:
     params: Dict[str, Any] = {}
     if (deduped := _dedupe(categories)):
-        params["category"] = json.dumps(deduped)
+        params["category"] = deduped
     if (deduped := _dedupe(levels)):
-        params["level"] = json.dumps(deduped)
+        params["level"] = deduped
     if (deduped := _dedupe(statuses)):
-        params["status"] = json.dumps(deduped)
+        params["status"] = deduped
     if (deduped := _dedupe(tools)):
-        params["tool"] = json.dumps(deduped)
+        params["tool"] = deduped
     return params
 
 
@@ -328,23 +391,53 @@ def qlty_get_first_issue(
     issues = list_response.get("data") or []
     first_issue = issues[0] if issues else None
 
+    filters = {
+        "owner": owner_key_or_id,
+        "project": project_key_or_id,
+        "categories": effective_categories,
+        "statuses": effective_statuses,
+        "levels": list(levels) if levels is not None else None,
+        "tools": list(tools) if tools is not None else None,
+    }
+
+    filters_summary = _format_filters_summary(
+        owner_key_or_id,
+        project_key_or_id,
+        filters["categories"],
+        filters["statuses"],
+        filters["levels"],
+        filters["tools"],
+    )
+
+    issue_reference = None
+    summary: str
+    recommendation: str
+
+    if first_issue:
+        summary = _summarize_issue(first_issue)
+        issue_reference = (
+            _stringify(first_issue.get("id"))
+            or _stringify((first_issue.get("attributes") or {}).get("key"))
+        )
+        recommendation = "Use this issue as the single source of truth before cloning or editing files."
+    else:
+        summary = f"No Qlty issues found for {filters_summary}."
+        recommendation = (
+            "Inform the user that no matching Qlty issues are open and wait for new instructions."
+        )
+
     result: Dict[str, Any] = {
         "success": True,
         "issue": first_issue,
         "issue_found": bool(first_issue),
-        "filters": {
-            "owner": owner_key_or_id,
-            "project": project_key_or_id,
-            "categories": effective_categories,
-            "statuses": effective_statuses,
-            "levels": list(levels) if levels is not None else None,
-            "tools": list(tools) if tools is not None else None,
-        },
+        "issue_reference": issue_reference,
+        "filters": filters,
+        "filters_summary": filters_summary,
+        "summary": summary,
+        "message": summary,
+        "recommendation": recommendation,
         "meta": list_response.get("meta"),
         "source": list_response.get("source"),
     }
-
-    if not first_issue:
-        result["message"] = "No issues matched the provided filters."
 
     return result

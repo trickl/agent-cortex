@@ -223,16 +223,25 @@ class Agent:
             f"[observation] Tool '{name}' reported a {severity} failure: {reason}."
         )
 
-        if metadata.get("fatal"):
+        retryable = metadata.get("retryable", False)
+        fatal = metadata.get("fatal")
+
+        if fatal:
             note += " Terminating the current run."
-        elif metadata.get("retryable", False):
+        elif retryable:
             note += " The error may be transient; consider retrying with adjusted parameters."
         else:
             note += " Please adjust the plan, arguments, or choose a different tool before continuing."
 
         user_message = None
-        if metadata.get("fatal"):
-            user_message = f"Unable to continue because tool '{name}' encountered a fatal error: {reason}."
+        if fatal:
+            user_message = (
+                f"Unable to continue because tool '{name}' encountered a fatal error: {reason}."
+            )
+        elif not retryable:
+            user_message = (
+                f"Stopping because tool '{name}' reported a non-retryable error: {reason}."
+            )
 
         return {"note": note, "user_message": user_message}
 
@@ -367,7 +376,9 @@ class Agent:
                                 if self.verbose:
                                     print(f"  Controller note: {note}")
                                 self.memory.add_assistant_message(content=note)
-                            if metadata.get("fatal"):
+                            fatal = metadata.get("fatal")
+                            retryable = metadata.get("retryable", False)
+                            if fatal or not retryable:
                                 should_terminate_agent = True
                                 final_agent_message = summary.get("user_message") or note
                                 break

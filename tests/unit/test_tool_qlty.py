@@ -27,6 +27,20 @@ class DummyResponse:
         return self._payload
 
 
+def test_build_filter_query_emits_repeated_params() -> None:
+    params = tool_qlty._build_filter_query(
+        categories=["lint", "vulnerability", "lint"],
+        levels=["high"],
+        statuses=["open", "ignored", "open"],
+        tools=["eslint", "typescript", "eslint"],
+    )
+
+    assert params["category"] == ["lint", "vulnerability"]
+    assert params["level"] == ["high"]
+    assert params["status"] == ["open", "ignored"]
+    assert params["tool"] == ["eslint", "typescript"]
+
+
 def test_qlty_list_issues_requires_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("QLTY_API_TOKEN", raising=False)
     result = tool_qlty.qlty_list_issues("acmeco", "awesome-project")
@@ -128,6 +142,10 @@ def test_qlty_get_first_issue_returns_single_issue(monkeypatch: pytest.MonkeyPat
     assert result["success"] is True
     assert result["issue"]["id"] == "issue-1"
     assert result["issue_found"] is True
+    assert "issue-1" in result["summary"]
+    assert result["message"] == result["summary"]
+    assert result["issue_reference"] == "issue-1"
+    assert "source of truth" in result["recommendation"].lower()
     assert captured["categories"] == ["lint"]
     assert captured["statuses"] == ["open"]
     assert captured["page_limit"] == 1
@@ -145,7 +163,10 @@ def test_qlty_get_first_issue_handles_no_results(monkeypatch: pytest.MonkeyPatch
     assert result["success"] is True
     assert result["issue"] is None
     assert result["issue_found"] is False
-    assert "no issues" in result["message"].lower()
+    assert "no qlty issues" in result["summary"].lower()
+    assert result["message"] == result["summary"]
+    assert "inform the user" in result["recommendation"].lower()
+    assert result["filters_summary"].startswith("acme/project")
 
 
 def test_qlty_get_first_issue_propagates_failure(monkeypatch: pytest.MonkeyPatch) -> None:
