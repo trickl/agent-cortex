@@ -136,7 +136,7 @@ def run_subgoal(
     explicit_tool_names: Optional[List[str]] = None,
     match_all_tags: bool = True,
     user_prompt: Optional[str] = None,
-    max_iterations: int = 5,
+    plan_max_retries: int = 1,
     llm_config_path: Optional[str] = None,
     verbose: bool = False,
 ) -> Dict[str, Any]:
@@ -151,7 +151,7 @@ def run_subgoal(
         explicit_tool_names: Optional list of tool names that must be loaded.
         match_all_tags: Whether all tags must match when filtering tools.
         user_prompt: Optional override for the user message sent to the sub-agent.
-        max_iterations: Iteration cap for the nested agent loop.
+        plan_max_retries: Maximum CPL replan attempts for the nested agent.
         llm_config_path: Optional custom LLM config path; defaults to llm_config.yaml.
         verbose: Whether to print verbose diagnostics from the nested agent.
 
@@ -207,7 +207,7 @@ def run_subgoal(
         system_prompt=system_prompt,
         available_tool_tags=allowed_tool_tags,
         match_all_tags=match_all_tags,
-        max_iterations=max_iterations,
+        plan_max_retries=plan_max_retries,
         verbose=verbose,
     )
 
@@ -228,12 +228,13 @@ def run_subgoal(
 def run_fetch_issue_subgoal(
     owner_key_or_id: str,
     project_key_or_id: str,
+    repo_url: Optional[str] = None,
     categories: Optional[List[str]] = None,
     statuses: Optional[List[str]] = None,
     levels: Optional[List[str]] = None,
     tools_filter: Optional[List[str]] = None,
     additional_context: Optional[Dict[str, Any]] = None,
-    max_iterations: int = 3,
+    plan_max_retries: int = 1,
     verbose: bool = False,
     llm_config_path: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -247,6 +248,8 @@ def run_fetch_issue_subgoal(
         "levels": levels or None,
         "tools": tools_filter or None,
     }
+    if repo_url:
+        context_packet["repo_url"] = repo_url
     if additional_context:
         context_packet["additional_context"] = additional_context
 
@@ -263,7 +266,7 @@ def run_fetch_issue_subgoal(
         allowed_tool_tags=["qlty_single_issue"],
         match_all_tags=False,
         user_prompt=user_prompt,
-        max_iterations=max_iterations,
+        plan_max_retries=plan_max_retries,
         llm_config_path=llm_config_path,
         verbose=verbose,
     )
@@ -279,7 +282,7 @@ def run_prepare_workspace_subgoal(
     project_repo_root_env: str = "PROJECT_REPO_ROOT",
     fallback_repo_url_envs: Optional[List[str]] = None,
     additional_context: Optional[Dict[str, Any]] = None,
-    max_iterations: int = 5,
+    plan_max_retries: int = 1,
     verbose: bool = False,
     llm_config_path: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -334,7 +337,7 @@ def run_prepare_workspace_subgoal(
         allowed_tool_tags=["git", "file_system", "shell"],
         match_all_tags=False,
         user_prompt=user_prompt,
-        max_iterations=max_iterations,
+        plan_max_retries=plan_max_retries,
         llm_config_path=llm_config_path,
         verbose=verbose,
     )
@@ -348,7 +351,7 @@ def run_understand_issue_subgoal(
     candidate_files: Optional[List[str]] = None,
     lint_rule: Optional[str] = None,
     additional_context: Optional[Dict[str, Any]] = None,
-    max_iterations: int = 4,
+    plan_max_retries: int = 1,
     verbose: bool = False,
 ) -> Dict[str, Any]:
     """Analyze a lint issue and return a concise diagnosis.
@@ -382,7 +385,7 @@ def run_understand_issue_subgoal(
         allowed_tool_tags=["file_system", "text_search"],
         match_all_tags=False,
         user_prompt=user_prompt,
-        max_iterations=max_iterations,
+        plan_max_retries=plan_max_retries,
         verbose=verbose,
     )
 
@@ -396,7 +399,7 @@ def run_patch_issue_subgoal(
     tests_to_run: Optional[List[str]] = None,
     desired_outcome: Optional[str] = None,
     additional_context: Optional[Dict[str, Any]] = None,
-    max_iterations: int = 6,
+    plan_max_retries: int = 1,
     verbose: bool = False,
 ) -> Dict[str, Any]:
     """Plan and apply patches for a diagnosed lint issue.
@@ -430,7 +433,7 @@ def run_patch_issue_subgoal(
         allowed_tool_tags=["file_system", "git", "shell"],
         match_all_tags=False,
         user_prompt=user_prompt,
-        max_iterations=max_iterations,
+        plan_max_retries=plan_max_retries,
         verbose=verbose,
     )
 
@@ -447,7 +450,7 @@ def run_finalize_issue_subgoal(
     tests_summary: Optional[str] = None,
     desired_outcome: Optional[str] = None,
     additional_context: Optional[Dict[str, Any]] = None,
-    max_iterations: int = 4,
+    plan_max_retries: int = 1,
     verbose: bool = False,
     llm_config_path: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -480,7 +483,7 @@ def run_finalize_issue_subgoal(
         allowed_tool_tags=["git", "file_system", "shell"],
         match_all_tags=False,
         user_prompt=user_prompt,
-        max_iterations=max_iterations,
+        plan_max_retries=plan_max_retries,
         llm_config_path=llm_config_path,
         verbose=verbose,
     )

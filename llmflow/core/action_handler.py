@@ -1,20 +1,14 @@
 """
-LLMFlow - A powerful framework for building AI agents based on GAME methodology
-(Goals, Actions, Memory, Environment).
+Deprecated ActionHandler module kept for backwards compatibility imports.
 
-Action Handler Module - Core component managing the execution of agent actions.
-This module implements the Actions component of the GAME methodology:
-- Parses LLM responses to identify tool calls
-- Validates and processes tool arguments
-- Executes tools through the tool registry
-- Handles tool execution errors and results
-- Supports both direct tool execution and environment-mediated actions
-- Manages terminal tools that can end agent execution
-- Provides comprehensive error handling and reporting
-
-The Action Handler ensures reliable and safe execution of agent-requested actions
-while maintaining proper communication format between the LLM and tools.
+The CPL-native agent no longer executes tools directly from LLM responses, so
+this module is intentionally disabled. Importing it now raises at import time to
+surface the migration requirement immediately.
 """
+
+raise RuntimeError(
+    "llmflow.core.action_handler has been removed; migrate to the CPL planning pipeline."
+)
 
 import json
 from uuid import uuid4
@@ -123,7 +117,6 @@ class ActionHandler:
                                                  This is optional and currently not the primary way tools are run.
                                                  Tools are primarily run via get_tool_function.
         """
-        self.environment_execute_action_callback = environment_execute_action_callback
 
     def parse_llm_response_for_tool_calls(self, assistant_message_obj: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Extracts tool call requests from an assistant's message object.

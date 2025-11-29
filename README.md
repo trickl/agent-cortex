@@ -268,7 +268,7 @@ print(plan.plan_source)
 Later Priority 5 steps will feed this plan into the CPL runtime so the agent can
 execute the synthesized workflow end-to-end.
 
-### 🔁 CPL Plan Retry & Telemetry
+### 🔁 Cortex Planning Language (CPL) Plan Retry & Telemetry
 
 Use `CPLPlanOrchestrator` when you want the full generate → execute → repair
 loop with structured reporting. The orchestrator automatically:
@@ -304,6 +304,27 @@ print(result["telemetry"])        # structured data for logs or analytics
 When integrating with the agent loop, write `result["summary"]` back to the
 conversation and stash `result["telemetry"]` for diagnostics so controllers and
 users can understand exactly what each plan attempted.
+
+## 🧭 CPL-Only Agent Workflow
+
+The top-level `Agent` now relies exclusively on the CPL planner/orchestrator
+stack. Legacy iterative loops have been removed in favour of a deterministic
+pipeline:
+
+1. Build a `CPLPlanRequest` from the incoming task, goal memory, and the
+	filtered syscall registry (tool access is controlled via tags).
+2. Ask `CPLPlanner` to generate the program and schedule it through
+	`CPLPlanOrchestrator`, which handles retries and repair prompts.
+3. Stream summaries, telemetry, and tool traces back into the agent memory so
+	subsequent turns can reason about successes or blockers.
+
+Agents expose a `plan_max_retries` parameter (CLI/config key
+`plan_max_retries`) that caps orchestrator attempts per user turn. Setting it to
+0 disables retries, while higher values enable the planner to repair invalid or
+failing programs automatically. Because the legacy `agent_execution` and
+`agent_prompting` modules now raise `RuntimeError` on import, ensure any custom
+agents instantiate `llmflow.core.agent.Agent` directly and configure tool tags
+via `available_tool_tags`/`match_all_tags`.
 
 ## 🤝 Contributing
 

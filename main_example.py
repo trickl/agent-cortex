@@ -21,7 +21,7 @@ current_script_dir = os.path.dirname(os.path.abspath(__file__))
 if current_script_dir not in sys.path:
     sys.path.insert(0, current_script_dir)
 
-def run_interactive_chat(model_name: str = "gpt-4", max_iterations: int = 0):
+def run_interactive_chat(model_name: str = "gpt-4"):
     """Runs an interactive chat session with the AI agent."""
     load_dotenv()
     load_all_tools()
@@ -101,13 +101,6 @@ For YouTube video download and transcription requests:
             "match_all_tags": False,  # Not used when available_tool_tags is None
             "verbose": True
         }
-        if max_iterations > 0:
-            agent_settings["max_iterations"] = max_iterations
-            print(f"Max Iterations: {max_iterations}")
-        else:
-            agent_settings["max_iterations"] = None
-            print("Max Iterations: Unlimited")
-
         ai_agent = Agent(**agent_settings)
         logger.info(f"Agent initialized successfully.")
 
@@ -141,8 +134,7 @@ For YouTube video download and transcription requests:
                 continue
 
             if user_input.lower() == "tools":
-                tool_names = [schema['function']['name'] for schema in ai_agent.active_tools_schemas if schema.get('function') and schema['function'].get('name')]
-                print("Available tools:", tool_names)
+                print("Allowed syscalls:", ai_agent.allowed_syscalls)
                 continue
 
             if not user_input:
@@ -169,14 +161,8 @@ def parse_args():
         default="gpt-4o-mini",
         help="Name of the LLM model to use"
     )
-    parser.add_argument(
-        "--max-iterations",
-        type=int,
-        default=0,
-        help="Maximum number of agent iterations per user message. 0 for unlimited."
-    )
     return parser.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
-    run_interactive_chat(model_name=args.model, max_iterations=args.max_iterations) 
+    run_interactive_chat(model_name=args.model) 

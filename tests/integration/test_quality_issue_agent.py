@@ -94,13 +94,18 @@ def test_quality_issue_agent_closes_first_lint_issue_end_to_end(
         if module_name:
             load_tool_module(module_name)
 
+    plan_retries = workflow.get("plan_max_retries")
+    if plan_retries is None:
+        plan_retries = workflow.get("max_iterations")
+    plan_retries = plan_retries if isinstance(plan_retries, int) and plan_retries >= 0 else 0
+
     agent = Agent(
         llm_client=llm_client,
         system_prompt=agent_config["base_context"]["system_prompt"],
         initial_goals=agent_goals,
         available_tool_tags=include_tags,
         match_all_tags=tag_settings.get("match_all", False),
-        max_iterations=workflow.get("max_iterations"),
+        plan_max_retries=plan_retries,
         verbose=True,
     )
 
@@ -112,7 +117,7 @@ def test_quality_issue_agent_closes_first_lint_issue_end_to_end(
     assert activated_tool_names, "Agent should load at least one tool schema."
     assert activated_tool_names.issuperset(explicit_tools)
     assert agent.available_tool_tags == include_tags
-    assert agent.max_iterations == workflow.get("max_iterations")
+    assert agent.plan_max_retries == plan_retries
 
     user_prompt = (
         f"Target owner/project: {owner_key}/{project_key}. "

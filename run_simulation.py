@@ -86,7 +86,7 @@ def run_agent_simulation():
     agent_goals = config.get("initial_agent_goals", [])
     available_tags = config.get("available_tool_tags", None)
     match_all = config.get("match_all_tags", True)
-    max_iterations = config.get("max_agent_iterations_per_turn", 0) # 0 means None/unlimited for Agent
+    plan_max_retries = max(config.get("max_agent_iterations_per_turn", 1), 0)
 
     print(f"No specific tool tags provided, agent has access to all registered tools." if not available_tags else f"Agent tools filtered by tags: {available_tags}")
 
@@ -99,12 +99,9 @@ def run_agent_simulation():
             "match_all_tags": match_all,
             "verbose": True
         }
-        if max_iterations > 0:
-            agent_settings["max_iterations"] = max_iterations
-            print(f"Max Iterations: {max_iterations}")
-        else:
-            agent_settings["max_iterations"] = None
-            print("Max Iterations: Unlimited")
+        if plan_max_retries > 0:
+            agent_settings["plan_max_retries"] = plan_max_retries
+            print(f"Plan retries: {plan_max_retries}")
             
         ai_agent = Agent(**agent_settings)
         logger.info(f"Loaded {len(ai_agent.active_tools_schemas)} tools for the agent.")
@@ -122,13 +119,8 @@ def run_agent_simulation():
             continue
         
         print(f"\n--- Interaction {i+1} --- ")
-        # Agent's add_user_message_and_run now returns the final message string
         final_message = ai_agent.add_user_message_and_run(user_input)
         print(f"\nAssistant: {final_message}")
-        
-        if ai_agent._check_completion(): # Check if agent decided to stop or completed goals
-            logger.info("Agent indicated completion or max iterations reached after this interaction.")
-            # break # Optionally break simulation if agent completes all goals early
 
     print("\n--- AGENT SIMULATION END ---")
     print("Final Goals Status:")

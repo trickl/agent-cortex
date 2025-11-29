@@ -48,7 +48,25 @@ def test_run_subgoal_invokes_nested_agent(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert result["success"] is True
     assert result["final_message"] == "subgoal complete"
     assert FakeAgent.last_kwargs["available_tool_tags"] == ["file_system"]
+    assert FakeAgent.last_kwargs["plan_max_retries"] == 1
     assert "Context packet" in FakeAgent.last_prompt
+
+
+def test_run_subgoal_allows_custom_retries(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    monkeypatch.setattr(tool_subgoal, "LLMClient", lambda config_file: FakeLLMClient(config_file))
+    monkeypatch.setattr(tool_subgoal, "Agent", FakeAgent)
+
+    llm_path = tmp_path / "llm.yaml"
+    llm_path.write_text("provider_config:\n  provider: generic\n  model: fake\n", encoding="utf-8")
+
+    tool_subgoal.run_subgoal(
+        goal_name="retry_goal",
+        objective="Need multiple attempts",
+        plan_max_retries=4,
+        llm_config_path=str(llm_path),
+    )
+
+    assert FakeAgent.last_kwargs["plan_max_retries"] == 4
 
 
 def test_run_subgoal_validates_inputs():
@@ -76,12 +94,14 @@ def test_run_understand_issue_wrapper_builds_context(monkeypatch: pytest.MonkeyP
         repo_path="/work/repo",
         candidate_files=["foo.py"],
         lint_rule="E501",
+        plan_max_retries=2,
     )
 
     assert result["success"] is True
     assert captured["goal_name"] == "understand_issue"
     assert captured["allowed_tool_tags"] == ["file_system", "text_search"]
     assert captured["context"]["candidate_files"] == ["foo.py"]
+    assert captured["plan_max_retries"] == 2
 
 
 def test_run_patch_issue_wrapper_builds_context(monkeypatch: pytest.MonkeyPatch):
@@ -100,12 +120,14 @@ def test_run_patch_issue_wrapper_builds_context(monkeypatch: pytest.MonkeyPatch)
         target_files=["foo.py"],
         tests_to_run=["pytest foo.py"],
         desired_outcome="Line under 100 chars",
+        plan_max_retries=3,
     )
 
     assert result["success"] is True
     assert captured["goal_name"] == "patch_issue"
     assert captured["allowed_tool_tags"] == ["file_system", "git", "shell"]
     assert captured["context"]["tests_to_run"] == ["pytest foo.py"]
+    assert captured["plan_max_retries"] == 3
 
 
 def test_run_understand_issue_wrapper_defaults_summary(monkeypatch: pytest.MonkeyPatch):

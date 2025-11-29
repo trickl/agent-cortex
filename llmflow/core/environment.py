@@ -1,17 +1,8 @@
-"""
-LLMFlow - A powerful framework for building AI agents based on GAME methodology
-(Goals, Actions, Memory, Environment).
+"""Deprecated environment shim kept for compatibility."""
 
-Environment Module - Core component managing the agent's interaction with the external world.
-This module implements the Environment component of the GAME methodology:
-- Manages tool execution and error handling
-- Acts as a bridge between abstract agent actions and concrete tool implementations
-- Provides robust error handling and reporting for tool execution
-- Supports dynamic tool registration and discovery
-- Includes comprehensive testing capabilities for tool execution scenarios
-
-The Environment ensures safe and controlled execution of agent actions in the real world.
-"""
+raise RuntimeError(
+    "llmflow.core.environment is no longer part of the CPL agent runtime."
+)
 from typing import Dict, Any, Callable
 import json
 

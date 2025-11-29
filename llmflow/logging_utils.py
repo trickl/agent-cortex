@@ -16,10 +16,10 @@ TOOLS_LOGGER_NAME = "agentcortex.tools"
 MANIFEST_LOGGER_NAME = "agentcortex.manifest"
 
 _LOG_FILE_SPEC = (
-    (LLM_LOGGER_NAME, "01-llm.log", "llm"),
-    (PLAN_LOGGER_NAME, "02-plans.log", "plans"),
-    (TOOLS_LOGGER_NAME, "03-tools.log", "tools"),
-    (MANIFEST_LOGGER_NAME, "99-manifest.log", "manifests"),
+    (LLM_LOGGER_NAME, "llm.log", "llm"),
+    (PLAN_LOGGER_NAME, "plans.log", "plans"),
+    (TOOLS_LOGGER_NAME, "tools.log", "tools"),
+    (MANIFEST_LOGGER_NAME, "manifest.log", "manifests"),
 )
 
 

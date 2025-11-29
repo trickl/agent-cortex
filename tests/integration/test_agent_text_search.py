@@ -73,7 +73,6 @@ def test_agent_finds_marker_via_real_llm(isolated_repo: Path) -> None:
         ),
         available_tool_tags=["search"],
         match_all_tags=False,
-        max_iterations=5,
         verbose=False,
     )
 

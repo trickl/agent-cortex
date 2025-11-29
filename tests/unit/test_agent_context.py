@@ -1,6 +1,6 @@
 import json
 
-from llmflow.core.agent import _prepare_tool_result_content
+from llmflow.core.agent_tool_utils import _prepare_tool_result_content
 
 
 def _serialize(payload):
