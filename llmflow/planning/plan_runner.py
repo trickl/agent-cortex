@@ -1,61 +1,23 @@
-"""Execution helpers for Java plan programs."""
+"""Static analysis entry points for Java plan programs."""
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
-from llmflow.runtime.syscall_registry import SyscallRegistry
-from llmflow.runtime.syscalls import build_default_syscall_registry
+import javalang
 
-from .deferred_planner import DeferredFunctionPrompt
-from .executor import PlanExecutor
+from .java_plan_analysis import JavaPlanGraph, analyze_java_plan
 from .java_planner import JavaPlanningError
-from .runtime.ast import DeferredExecutionOptions
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_SPEC_PATH = _PROJECT_ROOT / "planning" / "java_planning.md"
 
 
-class DeferredBodyPlanner:
-    """Adapter that uses an LLM to synthesize deferred Java function bodies."""
-
-    _SYSTEM_PROMPT = (
-        "You generate Java plan function bodies."
-        " Respond with only the function body block (including braces) that satisfies"
-        " the user's request."
-    )
-
-    def __init__(self, llm_client):
-        self._llm_client = llm_client
-
-    def __call__(self, prompt: DeferredFunctionPrompt) -> str:
-        messages = [
-            {"role": "system", "content": self._SYSTEM_PROMPT},
-            {"role": "user", "content": prompt.prompt},
-        ]
-        response = self._llm_client.generate(messages=messages, tools=None)
-        body = response.get("content") if isinstance(response, dict) else None
-        if not isinstance(body, str):
-            raise JavaPlanningError("Deferred planner did not return textual content.")
-        normalized = body.strip()
-        if not normalized:
-            raise JavaPlanningError("Deferred planner returned an empty body.")
-        return normalized
-
-
 class PlanRunner:
-    """High-level wrapper that executes Java plans using :class:`PlanExecutor`."""
+    """Parse Java plans and emit workflow graphs."""
 
-    def __init__(
-        self,
-        *,
-        registry_factory: Optional[Callable[[], SyscallRegistry]] = None,
-        deferred_planner: Optional[Callable[[DeferredFunctionPrompt], str]] = None,
-        specification: Optional[str] = None,
-    ):
-        self._registry_factory = registry_factory or build_default_syscall_registry
-        self._deferred_planner = deferred_planner
+    def __init__(self, *, specification: Optional[str] = None) -> None:
         self._specification = (specification or self._load_specification()).strip()
 
     def execute(
@@ -68,26 +30,57 @@ class PlanRunner:
         deferred_metadata: Optional[Dict[str, Any]] = None,
         deferred_constraints: Optional[Sequence[str]] = None,
     ) -> Dict[str, Any]:
-        registry = self._registry_factory()
-        deferred_options = None
-        if self._deferred_planner is not None:
-            deferred_options = DeferredExecutionOptions(
-                goal_summary=goal_summary,
-                metadata=dict(deferred_metadata or {}),
-                extra_constraints=list(deferred_constraints or []),
+        del capture_trace, goal_summary, deferred_metadata, deferred_constraints
+        metadata_payload = dict(metadata or {})
+        try:
+            graph = analyze_java_plan(plan_source)
+        except javalang.parser.JavaSyntaxError as exc:
+            error = _format_parse_error(exc)
+            return {
+                "success": False,
+                "errors": [error],
+                "graph": None,
+                "metadata": metadata_payload,
+                "trace": [],
+            }
+        except (ValueError, JavaPlanningError) as exc:
+            return {
+                "success": False,
+                "errors": [
+                    {
+                        "type": "analysis_error",
+                        "message": str(exc),
+                    }
+                ],
+                "graph": None,
+                "metadata": metadata_payload,
+                "trace": [],
+            }
+
+        validation_errors = self._validate_graph(graph)
+        function_names = [fn.name for fn in graph.functions]
+        metadata_payload.setdefault("functions", len(function_names))
+        metadata_payload["function_names"] = function_names
+        metadata_payload["syscall_count"] = sum(len(fn.syscalls) for fn in graph.functions)
+        return {
+            "success": not validation_errors,
+            "errors": validation_errors,
+            "graph": graph.to_dict(),
+            "metadata": metadata_payload,
+            "trace": [],
+        }
+
+    def _validate_graph(self, graph: JavaPlanGraph) -> List[Dict[str, Any]]:
+        errors: List[Dict[str, Any]] = []
+        if not any(fn.name == "main" for fn in graph.functions):
+            errors.append(
+                {
+                    "type": "validation_error",
+                    "message": "Java plan must include a main() function.",
+                    "function": None,
+                }
             )
-        executor = PlanExecutor(
-            registry,
-            deferred_planner=self._deferred_planner,
-            deferred_options=deferred_options,
-            specification=self._specification,
-        )
-        extra_metadata = dict(metadata) if metadata else None
-        return executor.execute_from_string(
-            plan_source,
-            capture_trace=capture_trace,
-            metadata=extra_metadata,
-        )
+        return errors
 
     @staticmethod
     def _load_specification() -> str:
@@ -99,4 +92,17 @@ class PlanRunner:
             ) from exc
 
 
-__all__ = ["PlanRunner", "DeferredBodyPlanner"]
+def _format_parse_error(error: javalang.parser.JavaSyntaxError) -> Dict[str, Any]:
+    line: Optional[int] = None
+    column: Optional[int] = None
+    if getattr(error, "position", None):
+        line, column = error.position
+    return {
+        "type": "parse_error",
+        "message": str(error),
+        "line": line,
+        "column": column,
+    }
+
+
+__all__ = ["PlanRunner"]

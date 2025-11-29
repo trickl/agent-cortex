@@ -1,132 +1,77 @@
-from typing import Callable, Dict, List
+"""Tests for the Java plan analysis graph (former interpreter suite)."""
+from __future__ import annotations
 
-import pytest
-
-from llmflow.planning.runtime.interpreter import (
-    ExecutionTracer,
-    PlanInterpreter,
-    PlanRuntimeError,
-)
-from llmflow.planning.runtime.parser import parse_java_plan
-from llmflow.planning.runtime.validator import ValidationError
-from llmflow.runtime.errors import ToolError
-from llmflow.runtime.syscall_registry import SyscallRegistry
+from llmflow.planning.java_plan_analysis import analyze_java_plan
 
 
-def _build_interpreter(source: str, syscalls: Dict[str, Callable[..., object]], tracer=None) -> PlanInterpreter:
-    plan = parse_java_plan(source)
-    registry = SyscallRegistry.from_mapping(syscalls)
-    return PlanInterpreter(plan, registry=registry, tracer=tracer)
+def _get_function(graph, name: str):
+    for function in graph.functions:
+        if function.name == name:
+            return function
+    raise AssertionError(f"Function {name} not found in graph")
 
 
-def test_interpreter_executes_plan():
-    messages: List[str] = []
+def test_analyze_plan_captures_syscalls_helpers_and_state():
+    source = """
+    public class Plan {
+        public void helper(String input) {
+            String message = formatter.format(input);
+            syscall.log(message);
+            record(message);
+            message = formatter.format(message);
+        }
 
-    def log_syscall(msg: str):
-        messages.append(msg)
+        public void record(String text) {
+            syscall.log(text);
+        }
 
-    tracer = ExecutionTracer(enabled=True)
-    interpreter = _build_interpreter(
-        """
-        public class Plan {
-            public void main() {
-                logItems("one", "two");
-                return;
-            }
+        public void main() {
+            String user = "world";
+            helper(user);
+            record(user);
+        }
+    }
+    """
 
-            public void logItems(String first, String second) {
-                syscall.log(first);
-                syscall.log(second);
-                return;
+    graph = analyze_java_plan(source)
+    helper = _get_function(graph, "helper")
+
+    assert [call.name for call in helper.syscalls] == ["log"]
+    helper_call_names = sorted(call.name for call in helper.helper_calls)
+    assert helper_call_names == ["format", "format", "record"]
+    assignments = helper.assignments
+    assert assignments[0].target == "message"
+    assert "formatter.format(input)" in assignments[0].expression
+    assert assignments[1].expression.endswith("message)")
+
+
+def test_analyze_plan_captures_branches_and_exception_handlers():
+    source = """
+    public class Plan {
+        public boolean shouldExecute() {
+            return true;
+        }
+
+        public void main() {
+            try {
+                if (shouldExecute()) {
+                    syscall.log("run");
+                } else {
+                    syscall.log("skip");
+                }
+                String label = shouldExecute() ? "yes" : "no";
+            } catch (Exception ex) {
+                syscall.log(ex.getMessage());
             }
         }
-        """,
-        {"log": log_syscall},
-        tracer=tracer,
-    )
+    }
+    """
 
-    interpreter.run()
+    graph = analyze_java_plan(source)
+    main_fn = _get_function(graph, "main")
 
-    assert messages == ["one", "two"]
-    assert any(event["type"] == "syscall_start" for event in tracer.as_list())
-
-
-def test_missing_syscall_reports_validation_error():
-    with pytest.raises(ValidationError) as exc_info:
-        _build_interpreter(
-            """
-            public class Plan {
-                public void main() {
-                    syscall.unknown();
-                    return;
-                }
-            }
-            """,
-            {},
-        )
-
-    assert "Syscall 'unknown' not registered" in str(exc_info.value)
-
-
-def test_tool_error_caught_by_try_catch():
-    events: List[str] = []
-
-    def flaky_syscall():
-        raise ToolError("boom")
-
-    def log_syscall(msg: str):
-        events.append(msg)
-
-    interpreter = _build_interpreter(
-        """
-        public class Plan {
-            public void main() {
-                try {
-                    syscall.flaky();
-                } catch (ToolError err) {
-                    syscall.log("caught");
-                }
-                return;
-            }
-        }
-        """,
-        {"flaky": flaky_syscall, "log": log_syscall},
-    )
-
-    interpreter.run()
-
-    assert events == ["caught"]
-
-
-def test_runtime_error_when_deferred_returns_non_list():
-    plan = parse_java_plan(
-        """
-        public class Plan {
-            public void main() {
-                List<String> values = loadValues();
-                for (String value : values) {
-                    syscall.log(value);
-                }
-                return;
-            }
-
-            @Deferred
-            public List<String> loadValues();
-        }
-        """,
-    )
-
-    registry = SyscallRegistry.from_mapping({"log": lambda msg: None})
-
-    def planner(_prompt):
-        return "{ return \"oops\"; }"
-
-    interpreter = PlanInterpreter(
-        plan,
-        registry=registry,
-        deferred_planner=planner,
-        spec_text="SPEC",
-    )
-
-    with pytest.raises(PlanRuntimeError, match="for-loop iterable must be a list"):
-        interpreter.run()
+    assert any(branch.kind == "if" for branch in main_fn.branches)
+    assert any(branch.kind == "ternary" for branch in main_fn.branches)
+    assert main_fn.exception_handlers[0].error_var == "ex"
+    assert len(main_fn.syscalls) == 3
+    assert main_fn.assignments[0].expression.startswith("(shouldExecute() ?")

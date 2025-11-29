@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import textwrap
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -176,6 +177,24 @@ class JavaPlanner:
         plan_source: str
         raw_response: Dict[str, Any]
         notes: Optional[str] = None
+        request_start = time.perf_counter()
+        normalized_syscalls = self._normalize_allowed_syscalls(request.allowed_syscalls)
+        retries = (
+            getattr(self._llm_client.provider, "max_retries", None)
+            or getattr(self._llm_client.provider, "default_retries", None)
+            or 0
+        )
+        status_prefix = "[JavaPlanner]"
+        print(
+            f"{status_prefix} Requesting structured Java plan (syscalls={normalized_syscalls or ['none']}, retries={retries})",
+            flush=True,
+        )
+        logger.info(
+            "%s Requesting structured Java plan (syscalls=%s, retries=%s)",
+            status_prefix,
+            normalized_syscalls or ["none"],
+            retries,
+        )
         try:
             payload = self._llm_client.structured_generate(
                 messages=messages,
@@ -184,6 +203,17 @@ class JavaPlanner:
                 tool_choice=self._planner_tool_choice,
             )
         except Exception as exc:  # pragma: no cover - provider dependent
+            elapsed = time.perf_counter() - request_start
+            print(
+                f"{status_prefix} Structured plan request failed after {elapsed:.1f}s: {exc}",
+                flush=True,
+            )
+            logger.warning(
+                "%s Structured plan request failed after %.1fs: %s",
+                status_prefix,
+                elapsed,
+                exc,
+            )
             friendly = _summarize_structured_failure(exc)
             if friendly:
                 logger.warning("%s Falling back to plain-text parsing.", friendly)
@@ -194,6 +224,17 @@ class JavaPlanner:
                 )
             plan_source, raw_response, notes = self._generate_plain_plan(messages)
         else:
+            elapsed = time.perf_counter() - request_start
+            print(
+                f"{status_prefix} Structured plan ready in {elapsed:.1f}s (notes={bool(payload.notes)})",
+                flush=True,
+            )
+            logger.info(
+                "%s Structured plan ready in %.1fs (notes=%s)",
+                status_prefix,
+                elapsed,
+                bool(payload.notes),
+            )
             plan_source = payload.java.strip()
             raw_response = payload.model_dump()
             if payload.notes:
@@ -279,6 +320,16 @@ class JavaPlanner:
             " If tools are unavailable, respond with the raw Java source only and do not"
             " emit explanations."
         )
+        schema_guidance = textwrap.dedent(
+            """
+            When the runtime requests structured output, you must emit a single JSON object matching:
+            {
+              "java": "public class Plan { ... }",
+              "notes": "Optional commentary about risks or TODOs (omit or null when unused)"
+            }
+            Do not introduce additional keys, arrays, or wrapper text around this object.
+            """
+        ).strip()
         tools_block = json.dumps(
             {
                 "available_tools": [self._planner_tool_schema["function"]],
@@ -289,7 +340,9 @@ class JavaPlanner:
             },
             indent=2,
         )
-        return f"{header}\n\n<available_tools>\n{tools_block}\n</available_tools>".strip()
+        return (
+            f"{header}\n\n{schema_guidance}\n\n<available_tools>\n{tools_block}\n</available_tools>"
+        ).strip()
 
     def _build_user_message(
         self,

@@ -1,89 +1,40 @@
 import pytest
 
-from llmflow.planning.runtime.parser import parse_java_plan
-from llmflow.planning.runtime.validator import PlanValidator, ValidationError
+from llmflow.planning.java_plan_analysis import analyze_java_plan
+from llmflow.planning.plan_runner import PlanRunner
 
 
-def _validate(source: str, syscalls: set[str]):
-    plan = parse_java_plan(source)
-    validator = PlanValidator(available_syscalls=syscalls)
-    validator.validate(plan)
+def test_analyze_java_plan_requires_class_declaration():
+    source = "public interface Empty {}"
+    with pytest.raises(ValueError):
+        analyze_java_plan(source)
 
 
-def test_validator_requires_main():
+def test_analyze_java_plan_prefers_plan_named_class():
     source = """
+    public class Helper {
+        public void noop() {}
+    }
+
     public class Plan {
-        public void helper() {
-            return;
-        }
+        public void main() {}
     }
     """
-    with pytest.raises(ValidationError) as exc_info:
-        _validate(source, set())
 
-    assert "main" in str(exc_info.value)
+    graph = analyze_java_plan(source)
+    assert graph.class_name == "Plan"
+    assert graph.functions[0].name == "main"
 
 
-def test_validator_detects_missing_syscall():
+def test_plan_runner_reports_validation_errors():
+    runner = PlanRunner(specification="SPEC")
     source = """
     public class Plan {
-        public void main() {
-            syscall.log("hi");
-            return;
-        }
+        public void helper() {}
     }
     """
-    with pytest.raises(ValidationError) as exc_info:
-        _validate(source, set())
 
-    assert "Syscall 'log' not registered" in str(exc_info.value)
+    result = runner.execute(source)
 
-
-def test_validator_flags_undefined_variable():
-    source = """
-    public class Plan {
-        public void main() {
-            syscall.log(msg);
-            return;
-        }
-    }
-    """
-    with pytest.raises(ValidationError) as exc_info:
-        _validate(source, {"log"})
-
-    assert "Variable 'msg' not defined" in str(exc_info.value)
-
-
-def test_validator_enforces_statement_limit():
-    statements = "\n".join(["            syscall.log(\"x\");" for _ in range(8)])
-    source = f"""
-    public class Plan {{
-        public void main() {{
-{statements}
-            return;
-        }}
-    }}
-    """
-
-    with pytest.raises(ValidationError) as exc_info:
-        _validate(source, {"log"})
-
-    assert "exceeds" in str(exc_info.value)
-
-
-def test_validator_requires_non_void_return_value():
-    source = """
-    public class Plan {
-        public void main() {
-            return;
-        }
-
-        public String compute() {
-            syscall.log("missing return");
-        }
-    }
-    """
-    with pytest.raises(ValidationError) as exc_info:
-        _validate(source, {"log"})
-
-    assert "must return a value" in str(exc_info.value)
+    assert result["success"] is False
+    assert result["errors"][0]["type"] == "validation_error"

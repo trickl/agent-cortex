@@ -80,3 +80,22 @@ The runtime enforces the following planning discipline:
 - Do not wrap the output in markdown fences or add commentary.
 - Ensure the program compiles in isolation and references only supplied
   syscalls or helper methods defined in your class.
+
+## 8. Structured Response Schema
+
+When the runtime requests structured output (e.g., via Instructor JSON mode),
+the model **must** emit a single JSON object that exactly matches this schema:
+
+```json
+{
+  "java": "public class Plan { /* full Java source */ }",
+  "notes": "Optional commentary about risks or TODOs (omit or null if unused)"
+}
+```
+
+- `java` is **required** and must contain the complete Java class described in
+  sections 1–7. The string should not include markdown fences or extra JSON
+  escaping beyond what is necessary for a valid JSON string.
+- `notes` is optional; when present, keep it short and focused on assumptions or
+  follow-ups. Do not introduce additional top-level keys, arrays, or nested
+  objects beyond this schema.

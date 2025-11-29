@@ -19,12 +19,16 @@ class DummyLLMClient:
         self.messages = None
         self.kwargs = None
         self.response_model = None
+        self.provider = type("Provider", (), {"max_retries": 0})()
 
     def structured_generate(self, *, messages, response_model, **kwargs):
         self.messages = messages
         self.kwargs = kwargs
         self.response_model = response_model
         return response_model(**self.payload)
+
+    def generate(self, **kwargs):  # pragma: no cover - fallback stub
+        raise JavaPlanningError("Planner returned invalid payload")
 
 
 def test_planner_builds_prompt_and_returns_plan():
@@ -66,8 +70,8 @@ def test_planner_flattens_list_notes():
     assert result.metadata.get("planner_notes") == "first\n\nsecond"
 
 
-def test_planner_raises_on_invalid_payload():
-    client = DummyLLMClient({"java": "class Nope {}"})
+def test_planner_raises_when_java_missing():
+    client = DummyLLMClient({"java": ""})
     planner = JavaPlanner(client, specification="SPEC CONTENT")
 
     with pytest.raises(JavaPlanningError):

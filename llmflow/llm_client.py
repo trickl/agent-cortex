@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 import instructor
 from instructor import Mode
+from instructor.core.hooks import HookName, Hooks
 import yaml
 from pydantic import BaseModel
 
@@ -122,10 +124,13 @@ class LLMClient:
             params.pop("parallel_tool_calls", None)
             params.pop("tools", None)
             params.pop("tool_choice", None)
+        existing_hooks = params.pop("hooks", None)
+        hooks = self._build_structured_logging_hooks(existing_hooks)
         client = self._ensure_structured_client()
         return client.create(
             messages=messages,
             response_model=response_model,
+            hooks=hooks,
             **params,
         )
 
@@ -145,6 +150,72 @@ class LLMClient:
             mode=self._structured_mode,
             **kwargs,
         )
+
+    def _build_structured_logging_hooks(self, existing: Optional[Hooks] = None) -> Hooks:
+        hooks = Hooks()
+        state: Dict[str, Any] = {"attempt": 0, "start": None}
+
+        def _log(message: str) -> None:
+            prefix = "[Instructor][structured]"
+            provider = self.provider_name or "unknown"
+            print(f"{prefix} {message} (provider={provider}, mode={self._structured_mode.name})", flush=True)
+
+        def _elapsed() -> Optional[float]:
+            start = state.get("start")
+            if start is None:
+                return None
+            return time.perf_counter() - start
+
+        def _summarize_error(error: Exception) -> str:
+            message = str(error)
+            if len(message) > 300:
+                return message[:297] + "..."
+            return message
+
+        def on_kwargs(*args: Any, **request_kwargs: Any) -> None:
+            state["attempt"] = state.get("attempt", 0) + 1
+            state["start"] = time.perf_counter()
+            model = request_kwargs.get("model") or self.model
+            _log(f"Attempt {state['attempt']} started for model={model}")
+
+        def on_response(response: Any) -> None:  # noqa: ANN401
+            elapsed = _elapsed()
+            if elapsed is not None:
+                _log(f"Attempt {state['attempt']} received completion in {elapsed:.1f}s")
+            else:
+                _log(f"Attempt {state['attempt']} received completion")
+
+        def on_parse_error(error: Exception) -> None:
+            elapsed = _elapsed()
+            detail = _summarize_error(error)
+            if elapsed is not None:
+                _log(f"Attempt {state['attempt']} parse error after {elapsed:.1f}s: {detail}")
+            else:
+                _log(f"Attempt {state['attempt']} parse error: {detail}")
+
+        def on_completion_error(error: Exception) -> None:
+            elapsed = _elapsed()
+            detail = _summarize_error(error)
+            if elapsed is not None:
+                _log(f"Attempt {state['attempt']} request error after {elapsed:.1f}s: {detail}")
+            else:
+                _log(f"Attempt {state['attempt']} request error: {detail}")
+
+        def on_last_attempt(error: Exception) -> None:
+            detail = _summarize_error(error)
+            _log(f"Attempt {state['attempt']} exhausted retries: {detail}")
+
+        hooks.on(HookName.COMPLETION_KWARGS, on_kwargs)
+        hooks.on(HookName.COMPLETION_RESPONSE, on_response)
+        hooks.on(HookName.PARSE_ERROR, on_parse_error)
+        hooks.on(HookName.COMPLETION_ERROR, on_completion_error)
+        hooks.on(HookName.COMPLETION_LAST_ATTEMPT, on_last_attempt)
+
+        if existing is not None:
+            if not isinstance(existing, Hooks):
+                raise TypeError("hooks must be an instance of instructor.core.hooks.Hooks")
+            return Hooks.combine(existing, hooks)
+        return hooks
 
     def _build_structured_kwargs(self) -> Dict[str, Any]:
         provider = self.provider_name

@@ -23,7 +23,7 @@ from llmflow.runtime.syscalls import build_default_syscall_registry
 from llmflow.llm_client import LLMClient
 from llmflow.logging_utils import RunArtifactManager, RunLogContext
 from llmflow.planning import JavaPlanner, JavaPlanRequest, PlanOrchestrator
-from llmflow.planning.plan_runner import PlanRunner, DeferredBodyPlanner
+from llmflow.planning.plan_runner import PlanRunner
 from llmflow.telemetry.mermaid_recorder import MermaidSequenceRecorder
 from llmflow.tools import get_module_for_tool_name, load_tool_module
 from llmflow.tools.tool_registry import get_tool_schema, get_tool_tags
@@ -116,7 +116,6 @@ class Agent(AgentInstrumentationMixin):
         self.plan_max_retries = max(plan_max_retries, 0)
         self._registry_factory = registry_factory or build_default_syscall_registry
         self._planner = planner or JavaPlanner(llm_client)
-        self._deferred_planner = DeferredBodyPlanner(llm_client)
         if runner_factory is not None:
             self._runner_factory = runner_factory
         else:
@@ -198,10 +197,7 @@ class Agent(AgentInstrumentationMixin):
     # Internal helpers
 
     def _build_default_runner_factory(self) -> PlanRunner:
-        return PlanRunner(
-            registry_factory=self._registry_factory,
-            deferred_planner=self._deferred_planner,
-        )
+        return PlanRunner()
 
     def _discover_syscalls(self) -> List[str]:
         registry = self._registry_factory()
@@ -285,15 +281,10 @@ class Agent(AgentInstrumentationMixin):
 
     def _build_plan_request(self, user_input: str) -> JavaPlanRequest:
         goals = [goal.description for goal in self.goal_manager.goals]
-        context_sections = [f"System prompt:\n{self.system_prompt.strip()}".strip()]
-        if self._last_run_summary:
-            context_sections.append(
-                f"Previous plan summary:\n{self._last_run_summary.strip()}"
-            )
-        context_sections.append(self._format_recent_memory())
-        context = "\n\n".join(section for section in context_sections if section)
+        task = self._format_planner_task(user_input)
+        context = self._build_planner_context()
         return JavaPlanRequest(
-            task=user_input.strip(),
+            task=task,
             goals=goals,
             context=context,
             allowed_syscalls=self.allowed_syscalls,
@@ -303,19 +294,49 @@ class Agent(AgentInstrumentationMixin):
             },
         )
 
-    def _format_recent_memory(self, limit: int = 6) -> str:
+    def _format_planner_task(self, user_input: str) -> str:
+        header = (
+            "Create a Java class named Planner that carries out the user's request. "
+            "Keep the structure minimal, lean on helper methods for decomposition, and "
+            "use allowed syscalls only when a step can be executed directly."
+        )
+        normalized = user_input.strip()
+        if not normalized:
+            raise ValueError("user_input must be a non-empty string")
+        return f"{header}\n\nUser request:\n{normalized}"
+
+    def _build_planner_context(self) -> Optional[str]:
+        sections: List[str] = []
+        if self._last_run_summary:
+            sections.append(f"Previous plan summary:\n{self._last_run_summary.strip()}")
+        recent_memory = self._format_recent_memory(limit=4, include_placeholder=False)
+        if recent_memory:
+            sections.append(recent_memory)
+        if not sections:
+            return None
+        return "\n\n".join(sections).strip()
+
+    def _format_recent_memory(self, limit: int = 6, include_placeholder: bool = True) -> str:
         recent = self.memory.get_last_n_messages(limit, as_dicts=True)
         if not recent:
-            return "No prior conversation."
+            return "No prior conversation." if include_placeholder else ""
         lines: List[str] = ["Recent conversation:"]
+        include_count = 0
         for message in recent:
             role = message.get("role", "unknown")
+            if role == "system":
+                continue
             content = message.get("content")
             if isinstance(content, str):
                 snippet = content.strip()
             else:
                 snippet = json.dumps(content, ensure_ascii=False)
+            if not snippet:
+                continue
             lines.append(f"- {role}: {snippet}")
+            include_count += 1
+        if include_count == 0:
+            return "No prior conversation." if include_placeholder else ""
         return "\n".join(lines)
 
     def _finalize_plan_result(self, result: Dict[str, Any]) -> str:

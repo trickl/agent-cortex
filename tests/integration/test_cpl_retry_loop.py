@@ -4,7 +4,6 @@ from typing import List
 
 from llmflow.planning import JavaPlanRequest, JavaPlanner, PlanOrchestrator
 from llmflow.planning.plan_runner import PlanRunner
-from llmflow.runtime.syscall_registry import SyscallRegistry
 
 
 class SequenceLLMClient:
@@ -20,21 +19,6 @@ class SequenceLLMClient:
         self.calls += 1
         payload = self._responses.pop(0)
         return response_model(**payload)
-
-
-def _registry_factory(capture: List[str]):
-    def factory() -> SyscallRegistry:
-        registry = SyscallRegistry()
-
-        def log(message: str) -> None:
-            capture.append(message)
-            return None
-
-        registry.register("log", log)
-        return registry
-
-    return factory
-
 
 def test_java_retry_loop_end_to_end():
     first_plan_missing_main = {
@@ -60,11 +44,9 @@ def test_java_retry_loop_end_to_end():
 
     llm = SequenceLLMClient([first_plan_missing_main, second_plan_succeeds])
     planner = JavaPlanner(llm, specification="SPEC")
-    messages: List[str] = []
     orchestrator = PlanOrchestrator(
         planner,
         runner_factory=lambda: PlanRunner(
-            registry_factory=_registry_factory(messages),
             specification="SPEC",
         ),
         max_retries=1,
@@ -78,7 +60,6 @@ def test_java_retry_loop_end_to_end():
     assert len(result["attempts"]) == 2
     assert result["attempts"][0]["execution"]["success"] is False
     assert result["attempts"][0]["execution"]["errors"][0]["type"] == "validation_error"
-    assert messages == ["success"]
     assert result["telemetry"]["attempt_count"] == 2
     assert "Attempt 1" in result["summary"]
     assert llm.calls == 2

@@ -1,91 +1,63 @@
 """Unit tests for :mod:`llmflow.planning.plan_runner`."""
 from __future__ import annotations
 
-from typing import Callable, Dict, List
-
 from llmflow.planning.plan_runner import PlanRunner
-from llmflow.runtime.syscall_registry import SyscallRegistry
 
 
-def _registry_factory(capture: List[str]) -> Callable[[], SyscallRegistry]:
-    def factory() -> SyscallRegistry:
-        registry = SyscallRegistry()
-
-        def log(message: str) -> None:
-            capture.append(message)
-            return None
-
-        registry.register("log", log)
-        return registry
-
-    return factory
-
-
-def test_execute_runs_plan_and_merges_metadata():
-    messages: List[str] = []
-    runner = PlanRunner(
-        registry_factory=_registry_factory(messages),
-        specification="SPEC",
-    )
+def test_execute_returns_graph_metadata():
+    runner = PlanRunner(specification="SPEC")
     plan_source = """
     public class Plan {
-        public void main() {
-            syscall.log("hello");
+        public void helper(String message) {
+            syscall.log(message);
             return;
+        }
+
+        public void main() {
+            helper("hi");
         }
     }
     """
-    metadata = {"request_id": "abc"}
 
-    result = runner.execute(plan_source, capture_trace=True, metadata=dict(metadata))
+    result = runner.execute(plan_source, metadata={"request_id": "abc"})
 
     assert result["success"] is True
-    assert messages == ["hello"]
-    assert result["metadata"]["has_trace"] is True
-    assert result["metadata"]["functions"] == 1
+    assert result["errors"] == []
+    assert isinstance(result["graph"], dict)
+    assert result["metadata"]["functions"] == 2
+    assert result["metadata"]["function_names"] == ["helper", "main"]
+    assert result["metadata"]["syscall_count"] == 1
     assert result["metadata"]["request_id"] == "abc"
-    assert metadata == {"request_id": "abc"}
-    assert isinstance(result["trace"], list)
 
 
-def test_execute_invokes_deferred_planner_with_context():
-    captured_prompt: Dict[str, object] = {}
-
-    def deferred_planner(prompt):
-        captured_prompt["prompt"] = prompt
-        return '{ syscall.log("deferred"); return; }'
-
-    messages: List[str] = []
-    runner = PlanRunner(
-        registry_factory=_registry_factory(messages),
-        deferred_planner=deferred_planner,
-        specification="SPEC",
-    )
-
+def test_execute_reports_missing_main():
+    runner = PlanRunner(specification="SPEC")
     plan_source = """
     public class Plan {
-        @Deferred
-        public void deferredTask();
-
-        public void main() {
-            deferredTask();
+        public void helper() {
+            syscall.log("noop");
             return;
         }
     }
     """
 
-    result = runner.execute(
-        plan_source,
-        metadata={"request_id": "xyz"},
-        goal_summary="demo",
-        deferred_metadata={"tier": "hot"},
-        deferred_constraints=["Rule"],
-    )
+    result = runner.execute(plan_source)
 
-    assert result["success"] is True
-    assert messages == ["deferred"]
-    prompt = captured_prompt["prompt"]
-    assert prompt.context.goal_summary == "demo"
-    assert prompt.context.extra_metadata["tier"] == "hot"
-    assert prompt.context.call_stack == ["main"]
-    assert prompt.allowed_syscalls == ["log"]
+    assert result["success"] is False
+    assert result["errors"][0]["type"] == "validation_error"
+
+
+def test_execute_reports_parse_error():
+    runner = PlanRunner(specification="SPEC")
+    plan_source = """
+    public class Plan {
+        public void main( {
+            syscall.log("oops");
+        }
+    }
+    """
+
+    result = runner.execute(plan_source)
+
+    assert result["success"] is False
+    assert result["errors"][0]["type"] == "parse_error"
