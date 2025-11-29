@@ -1,0 +1,136 @@
+////////////////////////////////////////////
+// Cortex Planning Language (CPL) Grammar //
+////////////////////////////////////////////
+
+start: plan
+
+//////////////////////
+// Plan & Functions //
+//////////////////////
+
+plan: "plan" "{" function+ "}"
+
+function: annotation_list? "function" NAME "(" parameters? ")" ":" type function_body
+
+function_body: "{" stmt* "}"     -> function_block
+             | ";"                 -> function_none
+
+parameters: parameter ("," parameter)*
+parameter: NAME ":" type
+
+annotation_list: annotation+
+
+annotation: "@" NAME annotation_args? -> annotation_decl
+
+annotation_args: "(" annotation_arg_list? ")"
+
+annotation_arg_list: annotation_arg ("," annotation_arg)*
+
+annotation_arg: NAME | STRING
+
+//////////////////////
+//   Type System    //
+//////////////////////
+
+?type: SIMPLE_TYPE
+     | list_type
+     | map_type
+
+SIMPLE_TYPE: "Void" | "String" | "Int" | "Bool" | "ToolResult"
+
+list_type: "List" "<" type ">"
+map_type:  "Map" "<" "String" "," type ">"
+
+//////////////////////
+//     Statements   //
+//////////////////////
+
+?stmt: var_decl
+     | assign
+     | if_stmt
+     | for_stmt
+     | try_stmt
+     | return_stmt
+     | expr_stmt
+
+var_decl: "let" NAME ":" type "=" expr ";"
+assign: NAME "=" expr ";"
+
+if_stmt: "if" "(" expr ")" "{" stmt* "}" "else" "{" stmt* "}"
+
+for_stmt: "for" "(" NAME "in" expr ")" "{" stmt* "}"
+
+try_stmt: "try"  "{" stmt* "}" "catch" "(" "ToolError" NAME ")" "{" stmt* "}"
+
+return_stmt: "return" expr? ";"
+
+expr_stmt: expr ";"     // stand-alone expression
+
+//////////////////////
+//   Expressions    //
+//////////////////////
+
+?expr: logic_or
+
+?logic_or: logic_and
+         | logic_or "||" logic_and   -> or_op
+
+?logic_and: equality
+           | logic_and "&&" equality -> and_op
+
+?equality: concat
+         | equality "==" concat      -> eq_op
+         | equality "!=" concat      -> ne_op
+
+?concat: term
+       | concat "+" term             -> concat
+
+?term: atom
+     | call
+     | syscall_call
+
+//////////////////////
+//    Call Forms    //
+//////////////////////
+
+call: NAME "(" args_call? ")"
+
+syscall_call: "syscall" "." NAME "(" args_call? ")"
+
+args_call: expr ("," expr)*
+
+//////////////////////
+//    Atom Values   //
+//////////////////////
+
+?atom: STRING
+     | INT
+     | BOOL
+     | list_literal
+     | map_literal
+     | NAME
+     | "(" expr ")"
+
+list_literal: "[" (expr ("," expr)*)? "]"
+
+map_literal:  "{" (map_item ("," map_item)*)? "}"
+map_item: STRING ":" expr
+
+//////////////////////
+//      Tokens      //
+//////////////////////
+
+BOOL: "true" | "false"
+INT: /[0-9]+/
+
+NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+
+STRING: /"([^"\\]|\\.)*"/
+
+//////////////////////
+//   Misc / Ignore  //
+//////////////////////
+
+COMMENT: /#[^\n]*/
+%ignore COMMENT
+%ignore /[ \t\r\n]+/

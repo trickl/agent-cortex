@@ -50,6 +50,13 @@ agent:
           name from an issue summary. When you invoke ``run_subgoal`` directly,
           provide a focused ``context`` packet, list only the tool tags that the
           helper truly needs, and summarise the output before acting on it.
+        • After each sub-goal (and any major tool sequence), ask yourself two
+          questions before deciding what to do next:
+            1. "Given the current evidence, have I achieved the end user goal?"
+            2. "Given the same evidence, am I blocked because I'm missing
+               information or have retried the same approach unsuccessfully?"
+          Only finish once you can confidently answer #1 (success) or #2 (clear
+          blocker). Otherwise, proceed immediately to the next required goal.
         • Keep reusing the stored ``repo_path`` for all subsequent git tools
           (``git_switch_branch``, ``git_stage_paths``, etc.). If a git tool ever
           reports that ``repo_path`` is missing, immediately re-issue the call
@@ -91,33 +98,45 @@ agent:
         • Honour repository hygiene: stage only the intended files, ensure
           branches follow the provided prefix, and surface the final PR URL.
   goals:
+    - description: "Continuously evaluate completion and blockers."
+      priority: 6
+      instructions:
+        - "After every sub-goal result, explicitly state whether the overall lint fix objective is: (a) complete, (b) blocked, or (c) still in progress."
+        - "If complete, transition into finalize/delivery steps and craft the closing summary."
+        - "If blocked, document the evidence (attempted tools, errors, missing info) and explain why another attempt is unlikely to succeed before ending."
+        - "If still in progress, immediately determine the next sub-goal or tool needed; do not end the conversation mid-pipeline."
     - description: "Identify the next lint issue to fix."
       priority: 5
       instructions:
         - "Call run_fetch_issue_subgoal with the configured owner/project filters before any git work."
         - "Record the returned issue packet (id, slug, summary, candidate files, lint rule)."
         - "If no issue is returned, report that outcome and stop."
+        - "When an issue is returned, note explicitly that additional goals remain and transition straight into workspace preparation."
     - description: "Prepare a clean workspace with an active feature branch."
       priority: 4
       instructions:
         - "Invoke run_prepare_workspace_subgoal using the repository URL, default branch, and issue reference."
         - "Persist the repo_path from the sub-goal response and reuse it for all git/file actions."
         - "Create or reuse a branch prefixed with working_branch_prefix before continuing."
+        - "After summarizing the workspace prep, confirm that understand/patch/finalize steps are still outstanding and continue unless a blocker was declared."
     - description: "Understand the lint issue."
       priority: 3
       instructions:
         - "Call run_understand_issue_subgoal with repo_path, issue metadata, candidate files, and lint rule."
         - "Summarize the diagnosis JSON (files, lines, root cause) in your own words for the user."
+        - "Explicitly state whether the diagnosis enables patching; if yes, proceed to the patch goal; if not, explain what extra info is needed before considering termination."
     - description: "Implement and verify the fix."
       priority: 2
       instructions:
         - "Run run_patch_issue_subgoal with repo_path plus the diagnosis summary to plan/apply the fix."
         - "Capture applied changes and test output so they can be referenced in commits/PRs."
+        - "After patching/tests, decide whether the issue is resolved. If yes, move directly to finalize; if no, describe the blocker and retry/exit according to the top-level termination goal."
     - description: "Finalize delivery with commit, tests evidence, and PR summary."
       priority: 1
       instructions:
         - "Call run_finalize_issue_subgoal to stage any remaining files, craft the commit, push, and (optionally) open a PR."
         - "Report commit SHA, branch, and tests/pr status back to the user."
+        - "Only now (or after declaring an unrecoverable blocker) produce the final user-facing message." 
   environment:
     repo_root_env_var: PROJECT_REPO_ROOT
     default_repo_root: .

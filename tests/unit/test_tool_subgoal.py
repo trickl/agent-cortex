@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List
 
 import pytest
@@ -174,7 +175,7 @@ def test_run_prepare_workspace_subgoal_uses_env(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("PROJECT_REPO_ROOT", "/tmp/worktree")
 
     tool_subgoal.run_prepare_workspace_subgoal(
-        repo_url="git@example.com:repo.git",
+        repo_url="git@github.com:example/repo.git",
         issue_reference="lint-1",
         branch_prefix="fix/issue-",
     )
@@ -182,6 +183,40 @@ def test_run_prepare_workspace_subgoal_uses_env(monkeypatch: pytest.MonkeyPatch)
     assert captured["goal_name"] == "prepare_workspace"
     assert "file_system" in captured["allowed_tool_tags"]
     assert captured["context"]["project_repo_root"] == "/tmp/worktree"
+    assert captured["context"]["repo_url"] == "git@github.com:example/repo.git"
+
+
+def test_run_prepare_workspace_subgoal_replaces_placeholder(monkeypatch: pytest.MonkeyPatch):
+    captured: Dict[str, Any] = {}
+
+    def fake_run_subgoal(**kwargs: Any) -> Dict[str, Any]:
+        captured.update(kwargs)
+        return {"success": True}
+
+    monkeypatch.setattr(tool_subgoal, "run_subgoal", fake_run_subgoal)
+    monkeypatch.setenv("PROJECT_REPO_ROOT", "/tmp/worktree")
+    monkeypatch.setenv("QUALITY_AGENT_TEST_REPO_URL", "git@github.com:owner/repo.git")
+
+    tool_subgoal.run_prepare_workspace_subgoal(
+        repo_url="https://github.com/your-username/your-repo.git",
+        issue_reference="lint-1",
+    )
+
+    assert captured["context"]["repo_url"] == "git@github.com:owner/repo.git"
+    assert captured["context"]["repo_url_source"] == "env:QUALITY_AGENT_TEST_REPO_URL"
+    assert os.environ["LLMFLOW_LAST_RESOLVED_REPO_URL"] == "git@github.com:owner/repo.git"
+
+
+def test_run_prepare_workspace_subgoal_errors_without_repo(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("QUALITY_AGENT_TEST_REPO_URL", raising=False)
+
+    result = tool_subgoal.run_prepare_workspace_subgoal(
+        repo_url=" ",
+        fallback_repo_url_envs=[],
+    )
+
+    assert result["success"] is False
+    assert "repo_url" in result["error"]
 
 
 def test_run_finalize_issue_subgoal_captures_context(monkeypatch: pytest.MonkeyPatch):

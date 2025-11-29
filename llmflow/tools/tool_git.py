@@ -11,7 +11,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 try:  # pragma: no cover - exercised indirectly in tests
@@ -37,6 +37,27 @@ _TOOL_TAGS = ["git", "devops", "version_control"]
 
 _INVALID_BRANCH_CHARS = re.compile(r"[^0-9a-zA-Z._/-]+")
 _DUPLICATE_SEPARATORS = re.compile(r"[._/-]{2,}")
+
+_PLACEHOLDER_REPO_MARKERS = (
+    "user-provided",
+    "your-",
+    "replace-with",
+    "repo-url",
+    "owner-key",
+    "project-key",
+    "<repo>",
+    "<owner>",
+)
+
+_FALLBACK_REPO_ENV_VARS = [
+    "LLMFLOW_LAST_RESOLVED_REPO_URL",
+    "QUALITY_AGENT_TEST_REPO_URL",
+    "PROJECT_REPOSITORY_URL",
+    "PROJECT_REPO_URL",
+    "REPOSITORY_URL",
+    "GITHUB_REPO_URL",
+    "REPO_URL",
+]
 
 
 def _extract_repo_slug(repo_url: str) -> Optional[str]:
@@ -80,6 +101,62 @@ def _slugify_branch_component(value: Optional[str]) -> str:
     text = _DUPLICATE_SEPARATORS.sub("-", text)
     text = text.strip("./-")
     return text or "update"
+
+
+def _looks_like_placeholder_repo_url(value: Optional[str]) -> bool:
+    if not value:
+        return True
+    lowered = value.strip().lower()
+    if not lowered:
+        return True
+    return any(marker in lowered for marker in _PLACEHOLDER_REPO_MARKERS)
+
+
+def _coerce_repo_url(repo_url: Optional[str]) -> Optional[str]:
+    candidates: List[Tuple[str, str]] = []
+    if repo_url and repo_url.strip():
+        candidates.append(("argument", repo_url.strip()))
+    for env_name in _FALLBACK_REPO_ENV_VARS:
+        env_value = os.getenv(env_name)
+        if env_value and env_value.strip():
+            candidates.append((env_name, env_value.strip()))
+
+    for source, candidate in candidates:
+        normalized = _prefer_https_clone(candidate)
+        if not _looks_like_placeholder_repo_url(normalized):
+            return normalized
+
+    return None
+
+
+def _should_force_https_clone() -> bool:
+    if os.getenv("LLMFLOW_ALLOW_SSH_CLONE") == "1":
+        return False
+    force_env = os.getenv("LLMFLOW_FORCE_HTTPS_CLONE")
+    if force_env == "1":
+        return True
+    if force_env == "0":
+        return False
+    return not os.getenv("SSH_AUTH_SOCK")
+
+
+def _prefer_https_clone(repo_url: str) -> str:
+    trimmed = repo_url.strip()
+    if not trimmed.startswith("git@"):
+        return trimmed
+    if not _should_force_https_clone():
+        return trimmed
+    try:
+        _, host_part = trimmed.split("@", 1)
+        host, path = host_part.split(":", 1)
+    except ValueError:
+        return trimmed
+    normalized_path = path.lstrip("/")
+    if not normalized_path:
+        return trimmed
+    if not normalized_path.endswith(".git"):
+        normalized_path = f"{normalized_path}.git"
+    return f"https://{host}/{normalized_path}"
 
 
 def _resolve_clone_destination(repo_url: str, destination: Optional[str]) -> Path:
@@ -163,11 +240,18 @@ def git_clone_repository(
 
     try:
         _require_git()
-        target_dir = _resolve_clone_destination(repo_url, destination)
+        resolved_repo_url = _coerce_repo_url(repo_url)
+        if not resolved_repo_url:
+            return _failure(
+                "Repository URL is missing or appears to be a placeholder. Provide a valid repo_url or set QUALITY_AGENT_TEST_REPO_URL.",
+                retryable=True,
+            )
+
+        target_dir = _resolve_clone_destination(resolved_repo_url, destination)
         clone_kwargs = {}
         if depth:
             clone_kwargs["depth"] = depth
-        repo = GitRepo.clone_from(repo_url, target_dir, **clone_kwargs)
+        repo = GitRepo.clone_from(resolved_repo_url, target_dir, **clone_kwargs)
         if branch:
             repo.git.checkout(branch)
         return {

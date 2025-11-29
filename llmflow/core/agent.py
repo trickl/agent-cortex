@@ -24,8 +24,11 @@ maintain coherent conversations while working towards specific goals.
 """
 
 import json
+import logging
+import os
 import time
-from typing import List, Dict, Any, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 # LLM Client
 from llmflow.llm_client import LLMClient # New LLM Client
@@ -38,6 +41,66 @@ from .environment import Environment
 
 # Tooling
 from llmflow.tools.tool_registry import get_all_tools_schemas, get_tools_by_tags
+from llmflow.logging_utils import (
+    LLM_LOGGER_NAME,
+    PLAN_LOGGER_NAME,
+    TOOLS_LOGGER_NAME,
+    RunArtifactManager,
+    RunLogContext,
+    setup_run_logging,
+    summarize_messages,
+    summarize_response,
+)
+from llmflow.telemetry.mermaid_recorder import MermaidSequenceRecorder
+
+
+_RUN_DIR_ENV = "LLMFLOW_ACTIVE_RUN_DIR"
+_RUN_ID_ENV = "LLMFLOW_ACTIVE_RUN_ID"
+
+
+def _prepare_tool_result_content(tool_name: Optional[str], content: str) -> str:
+    """Trim large tool payloads before adding them to conversation history."""
+
+    if tool_name != "qlty_list_issues":
+        return content
+    try:
+        payload = json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        return content
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return content
+
+    issue_count = len(data)
+    trimmed_data = data[:1] if issue_count else []
+    additional_ids = [
+        issue.get("id")
+        for issue in data[1:]
+        if isinstance(issue, dict) and issue.get("id")
+    ]
+    summary: Dict[str, Any] = {
+        "issue_count": issue_count,
+        "data": trimmed_data,
+        "data_truncated": issue_count > len(trimmed_data),
+        "additional_issue_ids": additional_ids,
+    }
+    if issue_count == 0:
+        summary["note"] = "Qlty API returned no issues for the requested filters."
+    elif issue_count > 1:
+        summary["note"] = (
+            "Trimmed Qlty response to the first issue to keep the context concise."
+        )
+    else:
+        summary["note"] = "Qlty API returned a single issue."
+
+    meta = payload.get("meta")
+    if isinstance(meta, dict) and meta:
+        summary["meta"] = meta
+    source = payload.get("source")
+    if isinstance(source, str) and source.strip():
+        summary["source"] = source
+
+    return json.dumps(summary, ensure_ascii=False)
 
 class Agent:
     """The AI Agent that uses Goals, Actions (Tools), Memory, and Environment."""
@@ -55,6 +118,7 @@ class Agent:
         verbose: bool = True,
         llm_max_retries: int = 2,
         llm_retry_delay: float = 2.0,
+        enable_run_logging: bool = True,
     ):
         self.llm_client = llm_client # Changed from llm_provider
         self.goal_manager = GoalManager(initial_goals=initial_goals)
@@ -73,6 +137,13 @@ class Agent:
         self.current_iteration = 0
         self.llm_max_retries = max(0, llm_max_retries)
         self.llm_retry_delay = max(0.0, llm_retry_delay)
+        self.enable_run_logging = enable_run_logging
+        self._run_log_context: Optional[RunLogContext] = None
+        self._run_artifact_manager: Optional[RunArtifactManager] = None
+        self._mermaid_recorder: Optional[MermaidSequenceRecorder] = None
+        self._run_failed: bool = False
+        self._last_prompt_summary: Optional[str] = None
+        self._owns_run_directory = False
 
         if self.verbose:
             print("Agent initialized with LLMClient.")
@@ -99,6 +170,131 @@ class Agent:
             print("No specific tool tags provided, agent has access to all registered tools.")
         elif self.verbose:
             print(f"Agent configured with tools matching tags: {self.available_tool_tags} (match_all: {self.match_all_tags_for_tools})")
+
+    def _start_run_instrumentation(self) -> None:
+        self._run_failed = False
+        self._last_prompt_summary = None
+        if not self.enable_run_logging:
+            self._run_log_context = None
+            self._run_artifact_manager = None
+            self._mermaid_recorder = None
+            return
+
+        parent_run_dir = os.getenv(_RUN_DIR_ENV)
+        parent_run_id = os.getenv(_RUN_ID_ENV)
+        if parent_run_dir and parent_run_id:
+            context = setup_run_logging(
+                run_id=parent_run_id,
+                logs_root=Path(parent_run_dir).resolve().parent,
+                run_directory=Path(parent_run_dir),
+            )
+            self._owns_run_directory = False
+        else:
+            context = setup_run_logging()
+            os.environ[_RUN_DIR_ENV] = str(context.run_dir)
+            os.environ[_RUN_ID_ENV] = context.run_id
+            self._owns_run_directory = True
+        self._run_log_context = context
+        self._run_artifact_manager = RunArtifactManager(context)
+        mermaid_dir = context.run_dir / "mermaid"
+        self._mermaid_recorder = MermaidSequenceRecorder(context.run_id, output_dir=mermaid_dir)
+
+    def _finalize_run_instrumentation(self) -> None:
+        if not self._run_log_context or not self._run_artifact_manager:
+            self._reset_instrumentation_handles()
+            return
+
+        if self._mermaid_recorder:
+            mermaid_path = self._mermaid_recorder.write()
+            self._run_artifact_manager.register_mermaid(mermaid_path)
+
+        self._run_artifact_manager.write_manifest(success=not self._run_failed)
+        if self._owns_run_directory:
+            os.environ.pop(_RUN_DIR_ENV, None)
+            os.environ.pop(_RUN_ID_ENV, None)
+            self._owns_run_directory = False
+        self._reset_instrumentation_handles()
+
+    def _reset_instrumentation_handles(self) -> None:
+        self._run_log_context = None
+        self._run_artifact_manager = None
+        self._mermaid_recorder = None
+        self._last_prompt_summary = None
+        self._owns_run_directory = False
+
+    def _mark_run_failure(self) -> None:
+        self._run_failed = True
+
+    @staticmethod
+    def _serialize_payload(payload: Any) -> str:
+        try:
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            return str(payload)
+
+    def _log_llm_prompt(self, messages: List[Dict[str, Any]]) -> None:
+        if not self._run_log_context:
+            return
+        summary = summarize_messages(messages)
+        self._last_prompt_summary = summary
+        logger = logging.getLogger(LLM_LOGGER_NAME)
+        logger.info(
+            "prompt iteration=%s message_count=%s summary=%s",
+            self.current_iteration,
+            len(messages),
+            summary,
+        )
+        serialized = self._serialize_payload(messages)
+        logger.info("prompt_detail iteration=%s\n%s", self.current_iteration, serialized)
+
+    def _log_llm_response(self, response: Dict[str, Any]) -> None:
+        if not self._run_log_context:
+            return
+        summary = summarize_response(response)
+        tool_calls = response.get("tool_calls") or []
+        logger = logging.getLogger(LLM_LOGGER_NAME)
+        logger.info(
+            "response iteration=%s tool_calls=%s summary=%s",
+            self.current_iteration,
+            len(tool_calls),
+            summary,
+        )
+        serialized = self._serialize_payload(response)
+        logger.info("response_detail iteration=%s\n%s", self.current_iteration, serialized)
+        if self._mermaid_recorder and self._last_prompt_summary is not None:
+            self._mermaid_recorder.record_llm_exchange(self._last_prompt_summary, summary)
+
+    def _log_tool_result(
+        self,
+        tool_name: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+        content: Optional[str],
+    ) -> None:
+        if not self._run_log_context:
+            return
+        payload = metadata or {}
+        status = "success" if payload.get("success", True) else "failed"
+        retryable = payload.get("retryable", False)
+        fatal = payload.get("fatal", False)
+        error_text = payload.get("error") or ""
+        preview = (content or "").replace("\n", " ")
+        if len(preview) > 180:
+            preview = preview[:177] + "..."
+        logging.getLogger(TOOLS_LOGGER_NAME).info(
+            "tool=%s status=%s retryable=%s fatal=%s detail=%s preview=%s",
+            tool_name or "unknown_tool",
+            status,
+            retryable,
+            fatal,
+            error_text,
+            preview,
+        )
+        if self._mermaid_recorder:
+            status_hint = "success" if payload.get("success", True) else (error_text or "failed")
+            self._mermaid_recorder.record_tool_call(tool_name or "unknown_tool", status_hint)
+
+    def _pending_goal_count(self) -> int:
+        return sum(1 for goal in self.goal_manager.goals if not goal.completed)
 
     def _construct_prompt(self) -> List[Dict[str, Any]]:
         """Constructs the full prompt for the LLM, including history and goals."""
@@ -159,6 +355,23 @@ class Agent:
         self.context_trace.append(entry)
         if len(self.context_trace) > self._MAX_CONTEXT_TRACE:
             self.context_trace.pop(0)
+
+        if self._run_log_context:
+            logging.getLogger(PLAN_LOGGER_NAME).info(
+                "stage=%s iteration=%s pending_goals=%s messages=%s approx_chars=%s tool_messages=%s",
+                stage,
+                self.current_iteration,
+                self._pending_goal_count(),
+                msg_count,
+                approx_chars,
+                tool_messages,
+            )
+            if self._mermaid_recorder and stage == "pre_llm_prompt":
+                self._mermaid_recorder.record_plan_attempt(
+                    self.current_iteration,
+                    "snapshot",
+                    f"pending_goals={self._pending_goal_count()}",
+                )
         if self.verbose:
             print(
                 f"[context] {stage}: {msg_count} msgs, ~{approx_chars} chars, {tool_messages} tool msgs."
@@ -259,18 +472,22 @@ class Agent:
         """Adds a user message and runs the agent loop until it needs new input or finishes.
         Returns the final agent message content as a string, or None if no specific message was produced.
         """
-        self.memory.add_user_message(user_input)
-        if self.verbose: print(f"\\nIteration {self.current_iteration + 1}: User says: '{user_input}'")
-        
-        # Reset current_iteration for a new user message if agent is not designed to be strictly goal-completion oriented
-        # For an interactive chat, each user message starts a new "turn" or mini-session.
-        # If max_iterations is meant per user message, reset it here.
-        # If agent is strictly goal-oriented and continues across user messages until goals are met, don't reset.
-        # For this interactive loop, resetting seems more appropriate.
-        self.current_iteration = 0 
-        
-        final_agent_message_content = self.run_main_loop() # run_main_loop will now return the string content
-        return final_agent_message_content
+        self._start_run_instrumentation()
+        try:
+            self.memory.add_user_message(user_input)
+            if self.verbose: print(f"\nIteration {self.current_iteration + 1}: User says: '{user_input}'")
+            
+            # Reset current_iteration for a new user message if agent is not designed to be strictly goal-completion oriented
+            # For an interactive chat, each user message starts a new "turn" or mini-session.
+            # If max_iterations is meant per user message, reset it here.
+            # If agent is strictly goal-oriented and continues across user messages until goals are met, don't reset.
+            # For this interactive loop, resetting seems more appropriate.
+            self.current_iteration = 0 
+            
+            final_agent_message_content = self.run_main_loop() # run_main_loop will now return the string content
+            return final_agent_message_content
+        finally:
+            self._finalize_run_instrumentation()
 
     def run_main_loop(self) -> Optional[str]:
         """Runs the main agent cycle: Prompt -> LLM -> Parse -> Execute -> Update Memory -> Check Completion.
@@ -282,6 +499,12 @@ class Agent:
 
         while not self._check_completion() and not should_terminate_agent:
             self.current_iteration += 1
+            if self._mermaid_recorder:
+                self._mermaid_recorder.record_plan_attempt(
+                    self.current_iteration,
+                    "start",
+                    f"pending_goals={self._pending_goal_count()}",
+                )
             if self.verbose:
                 if self.max_iterations is not None and self.max_iterations > 0:
                     print(f"\\n--- Agent Iteration: {self.current_iteration}/{self.max_iterations} ---")
@@ -289,6 +512,7 @@ class Agent:
                     print(f"\\n--- Agent Iteration: {self.current_iteration} ---")
 
             llm_messages = self._construct_prompt()
+            self._log_llm_prompt(llm_messages)
             if self.verbose:
                 print("Constructed LLM Messages:")
                 for msg in llm_messages[-3:]: # Show last few for brevity
@@ -314,6 +538,7 @@ class Agent:
                 )
                 print(final_agent_message)
                 self.memory.add_assistant_message(content=final_agent_message)
+                self._mark_run_failure()
                 break
             
             # The new LLMClient directly returns the assistant message object (or an error structure)
@@ -325,6 +550,7 @@ class Agent:
                 error_content = f"Error: LLM response format is not as expected or indicates an error. Received: {assistant_message_obj}"
                 print(error_content)
                 self.memory.add_assistant_message(content=error_content)
+                self._mark_run_failure()
                 break 
 
             if "Error:" in str(assistant_message_obj.get("content")) and assistant_message_obj.get("role") == "assistant":
@@ -332,10 +558,12 @@ class Agent:
                 print(f"LLMClient reported an error: {error_text}")
                 self.memory.add_assistant_message(content=error_text, tool_calls=None)
                 final_agent_message = error_text
+                self._mark_run_failure()
                 break  # Stop processing this turn if LLM had an error
 
             self.memory.add_assistant_message(content=assistant_message_obj.get("content"),
                                             tool_calls=assistant_message_obj.get("tool_calls"))
+            self._log_llm_response(assistant_message_obj)
             
             if self.verbose:
                 print("LLM Response Received (via LLMClient):")
@@ -358,14 +586,21 @@ class Agent:
                 if self.verbose: print("Adding tool results to memory...")
                 for res_dict in tool_results:
                     if res_dict.get("role") == "tool":
+                        raw_result_content = res_dict.get("content")
+                        result_content = raw_result_content
+                        if isinstance(result_content, str):
+                            result_content = _prepare_tool_result_content(
+                                res_dict.get("name"), result_content
+                            )
                         self.memory.add_tool_result_message(
                             tool_call_id=res_dict["tool_call_id"],
-                            result=res_dict.get("content"),
+                            result=result_content,
                             function_name=res_dict.get("name")
                         )
                         if self.verbose: print(f"  Added tool result: {res_dict.get('name') or res_dict['tool_call_id']} -> {str(res_dict['content'])[:100]}...")
 
                         metadata = res_dict.get("metadata") or {}
+                        self._log_tool_result(res_dict.get("name"), metadata, raw_result_content if isinstance(raw_result_content, str) else str(raw_result_content))
                         tool_failed = not metadata.get("success", True)
                         if tool_failed:
                             summary = self._summarize_tool_failure(
@@ -379,6 +614,7 @@ class Agent:
                             fatal = metadata.get("fatal")
                             retryable = metadata.get("retryable", False)
                             if fatal or not retryable:
+                                self._mark_run_failure()
                                 should_terminate_agent = True
                                 final_agent_message = summary.get("user_message") or note
                                 break

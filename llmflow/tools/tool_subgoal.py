@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from llmflow.core.agent import Agent
 from llmflow.llm_client import LLMClient
@@ -68,6 +68,42 @@ _FINALIZE_INSTRUCTIONS = (
     "include 'Commit Summary', 'Test Evidence', and a JSON block named 'Delivery' with commit_sha, branch, "
     "tests_status, and pr_url (if created)."
 )
+
+_PLACEHOLDER_REPO_MARKERS = (
+    "user-provided",
+    "your-",
+    "replace-with",
+    "repo-url",
+    "owner-key",
+    "project-key",
+    "<repo>",
+    "<owner>",
+)
+
+
+def _looks_like_placeholder_repo_url(value: str) -> bool:
+    lowered = value.strip().lower()
+    if not lowered:
+        return True
+    return any(marker in lowered for marker in _PLACEHOLDER_REPO_MARKERS)
+
+
+def _resolve_repo_url(
+    provided_url: Optional[str], fallback_envs: Sequence[str]
+) -> Tuple[Optional[str], Optional[str]]:
+    candidates: List[Tuple[str, str]] = []
+    if provided_url and provided_url.strip():
+        candidates.append((provided_url.strip(), "argument"))
+    for env_name in fallback_envs:
+        env_value = os.getenv(env_name)
+        if env_value and env_value.strip():
+            candidates.append((env_value.strip(), f"env:{env_name}"))
+
+    for candidate, source in candidates:
+        if not _looks_like_placeholder_repo_url(candidate):
+            return candidate, source
+
+    return None, None
 
 
 def _serialize_context(context: Optional[Dict[str, Any]]) -> str:
@@ -235,12 +271,13 @@ def run_fetch_issue_subgoal(
 
 @register_tool(tags=_SUBGOAL_TAGS)
 def run_prepare_workspace_subgoal(
-    repo_url: str,
+    repo_url: Optional[str] = None,
     issue_reference: Optional[str] = None,
     default_branch: str = "main",
     branch_prefix: str = "fix/issue-",
     prefer_reuse_checkout: bool = True,
     project_repo_root_env: str = "PROJECT_REPO_ROOT",
+    fallback_repo_url_envs: Optional[List[str]] = None,
     additional_context: Optional[Dict[str, Any]] = None,
     max_iterations: int = 5,
     verbose: bool = False,
@@ -248,14 +285,38 @@ def run_prepare_workspace_subgoal(
 ) -> Dict[str, Any]:
     """Clone the repository (or reuse an existing checkout) and create a feature branch."""
 
+    repo_url_envs = fallback_repo_url_envs or [
+        "QUALITY_AGENT_TEST_REPO_URL",
+        "PROJECT_REPOSITORY_URL",
+        "PROJECT_REPO_URL",
+        "REPOSITORY_URL",
+        "GITHUB_REPO_URL",
+        "REPO_URL",
+    ]
+    resolved_repo_url, repo_url_source = _resolve_repo_url(repo_url, repo_url_envs)
+    if not resolved_repo_url:
+        return {
+            "success": False,
+            "error": (
+                "Unable to resolve 'repo_url'. Provide it explicitly or set one of: "
+                f"{', '.join(repo_url_envs)}"
+            ),
+            "retryable": False,
+        }
+
+    os.environ["LLMFLOW_LAST_RESOLVED_REPO_URL"] = resolved_repo_url
+
     context_packet: Dict[str, Any] = {
-        "repo_url": repo_url,
+        "repo_url": resolved_repo_url,
+        "repo_url_source": repo_url_source,
+        "requested_repo_url": repo_url,
         "issue_reference": issue_reference,
         "default_branch": default_branch,
         "branch_prefix": branch_prefix,
         "prefer_reuse_checkout": prefer_reuse_checkout,
         "project_repo_root_env": project_repo_root_env,
         "project_repo_root": os.getenv(project_repo_root_env),
+        "fallback_repo_url_envs": repo_url_envs,
     }
     if additional_context:
         context_packet["additional_context"] = additional_context

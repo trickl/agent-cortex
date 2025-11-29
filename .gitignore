@@ -45,6 +45,9 @@ MANIFEST
 # Installer logs
 *.log
 
+# Execution logs
+logs/
+
 # Unit test / coverage reports
 env/
 .env

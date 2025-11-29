@@ -177,6 +177,134 @@ pip install -r requirements.txt
 # Example run (placeholder)
 python main.py --event post_commit --repo https://github.com/your/repo
 ```
+
+## 🛠 CPL Plan Executor
+
+You can execute CPL plans programmatically without touching the lower-level parser/interpreter APIs. The `PlanExecutor` handles parsing, validation, execution, and tracing in one shot:
+
+```python
+from dsl.plan_executor import PlanExecutor
+from dsl.syscall_registry import SyscallRegistry
+
+registry = SyscallRegistry()
+registry.register("log", print)
+
+executor = PlanExecutor(registry)
+
+plan = """plan {
+	function main() : Void {
+		syscall.log("Hello, CPL!");
+		return;
+	}
+}
+"""
+
+result = executor.execute_from_string(plan, capture_trace=True)
+
+if result["success"]:
+	print("Plan succeeded", result["trace"])
+else:
+	print("Plan failed", result["errors"])
+```
+
+`result` is always a dict that contains a `success` flag, the interpreter `return_value`, structured `errors`, optional `trace` events, and any metadata you pass in.
+
+## 🔌 Syscall Modules
+
+The DSL now ships with a batteries-included syscall registry so CPL plans can invoke
+real git, filesystem, and Qlty tools without extra plumbing. Use
+`dsl.syscalls.register_default_syscalls` (or the convenience constructor
+`dsl.syscalls.build_default_syscall_registry`) to populate a `SyscallRegistry`
+before handing it to the interpreter or `PlanExecutor`:
+
+```python
+from dsl.plan_executor import PlanExecutor
+from dsl.syscalls import build_default_syscall_registry
+
+registry = build_default_syscall_registry()
+executor = PlanExecutor(registry)
+
+# Optional: override the logger or swap in custom tool modules.
+# register_default_syscalls(registry, logger=my_logger)
+```
+
+The default modules expose the following syscall names to CPL plans:
+
+- Utility: `log`
+- Git: `cloneRepo`, `createBranch`, `suggestBranchName`, `switchBranch`,
+  `stagePaths`, `commitChanges`, `getUncommittedChanges`, `pushBranch`,
+  `createPullRequest`
+- Files: `listFilesInTree`, `readTextFile`, `overwriteTextFile`, `applyTextRewrite`
+- Qlty: `qltyListIssues`, `qltyGetFirstIssue`
+
+Each syscall raises `ToolError` (catchable via `try`/`catch` in CPL) when the
+underlying tool reports a failure, so plans can rely on consistent error handling.
+
+## 🧠 CPL Plan Synthesizer
+
+Priority 5 introduces a dedicated planner hook so agents can request structured
+CPL programs before execution. The `CPLPlanner` class automatically loads the DSL
+specification from `dsl/planning.md`, injects the allowed syscall list, and
+returns the raw CPL source together with request metadata.
+
+```python
+from llmflow.llm_client import LLMClient
+from llmflow.planning import CPLPlanRequest, CPLPlanner
+
+llm = LLMClient()
+planner = CPLPlanner(llm)
+
+plan = planner.generate_plan(
+	CPLPlanRequest(
+		task="Triage the failing lint issue",
+		goals=["Fetch the issue details", "Reproduce and patch the failure"],
+		allowed_syscalls=["log", "qltyListIssues", "readTextFile"],
+	)
+)
+
+print(plan.plan_source)
+```
+
+Later Priority 5 steps will feed this plan into the CPL runtime so the agent can
+execute the synthesized workflow end-to-end.
+
+### 🔁 CPL Plan Retry & Telemetry
+
+Use `CPLPlanOrchestrator` when you want the full generate → execute → repair
+loop with structured reporting. The orchestrator automatically:
+
+- retries failed plans (validation or runtime) with bounded repair hints,
+- captures per-attempt traces/tool usage, and
+- returns a concise human-readable summary you can drop into agent memory.
+
+```python
+from llmflow.planning import CPLPlanOrchestrator, CPLPlanRequest, CPLPlanner
+from llmflow.planning.plan_runner import CPLPlanRunner
+
+planner = CPLPlanner(llm_client)
+orchestrator = CPLPlanOrchestrator(
+	planner,
+	runner_factory=lambda: CPLPlanRunner(),
+	max_retries=2,
+)
+
+result = orchestrator.execute_with_retries(
+	CPLPlanRequest(
+		task="Repair the failing lint issue",
+		goals=["Reproduce", "Patch", "Verify"],
+		allowed_syscalls=["log", "qltyListIssues"],
+	),
+	capture_trace=True,
+)
+
+print(result["summary"])          # e.g., "✅ CPL plan run – 2 attempt(s) …"
+print(result["telemetry"])        # structured data for logs or analytics
+```
+
+When integrating with the agent loop, write `result["summary"]` back to the
+conversation and stash `result["telemetry"]` for diagnostics so controllers and
+users can understand exactly what each plan attempted.
+
 ## 🤝 Contributing
 
 We welcome contributions of all kinds:
