@@ -1,14 +1,16 @@
 # Java Planning Specification
 
-This document replaces the legacy CPL grammar with a Java-centric contract. The
-language model must emit *compilable Java source* that describes the full plan.
+The language model must emit *compilable Java source* that describes the full plan.
 
 ## 1. Source Layout
 
-- Output exactly one `public class Plan` definition.
-- Place every helper as a `public` or `private` method inside `Plan`.
-- Always include a `public void main()` method as the entrypoint.
-- Do not emit package statements, imports, or explanations.
+- Output exactly one top-level class. It may be named however you like, and it
+  does not need to be `public`.
+- Place every helper as a `public` or `private` method inside that class.
+- Include a `public void main()` entrypoint when multiple steps need to be
+  orchestrated; emitting only a `main` method is acceptable for simple plans.
+- Java comments are allowed for readability.
+- Do not emit package statements, imports, or prose explanations.
 
 ## 2. Method Rules
 
@@ -17,9 +19,10 @@ language model must emit *compilable Java source* that describes the full plan.
   methods.
 - Methods may accept and return the following types: `Void`, `String`, `Int`,
   `Bool`, `ToolResult`, `List<T>`, or `Map<String,T>`.
-- Annotate any method that should be synthesized at runtime with `@Deferred`. A
-  deferred method may omit its body by ending the signature with a semicolon.
-- Non-deferred methods must include a body enclosed in braces.
+- Invented helper functions must either call more concrete helpers or invoke a
+  syscall. Tool calls should only appear at the leaves of the call graph.
+- Since invented helpers are implicitly deferred, omit business logic beyond
+  chaining helper calls or dispatching a syscall.
 
 ## 3. Allowed Statements
 
@@ -54,16 +57,28 @@ reflection. Rely on helper methods instead of inline block expressions.
 - Maps must be produced via helper methods or syscalls; manual `HashMap`
   construction is unsupported.
 
-## 6. Deferred Functions
+## 6. Hierarchical Planning Rules
 
-- Use `@Deferred` when the runtime should synthesize the body later.
-- Deferred methods may omit their body or provide a sketch that the runtime can
-  overwrite.
-- Non-deferred methods must include compilable bodies.
+The runtime enforces the following planning discipline:
+
+- **Rule 1 — Invent functions to decompose the problem into steps.** Helpers
+  represent smaller sub-goals beneath the caller.
+- **Rule 2 — If a step can be completed using an available tool, call the tool
+  directly.** Do not invent another helper when a syscall can perform the work.
+- **Rule 3 — Each invented function must reduce complexity.** Every helper must
+  be strictly more specific than its caller so decomposition steadily converges
+  toward concrete actions.
+- **Rule 4 — All invented functions are implicitly deferred; tool calls are the
+  terminal nodes.** Helper bodies therefore string together other helpers until
+  reaching a syscall.
+- **Rule 5 — Maximum hierarchical depth is 7.** The root counts as depth 1. If a
+  plan would exceed 7 nested helper levels, redesign it using broader steps.
 
 ## 7. Output Requirements
 
-- Respond exclusively with Java source that satisfies this document.
+- Respond exclusively with Java source that satisfies this document. A single
+  assistant-text message containing the class definition is acceptable; a
+  `define_java_plan` tool call is not required.
 - Do not wrap the output in markdown fences or add commentary.
 - Ensure the program compiles in isolation and references only supplied
-  syscalls or helper methods defined in `Plan`.
+  syscalls or helper methods defined in your class.
