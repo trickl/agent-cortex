@@ -278,6 +278,8 @@ synthesized workflow end-to-end.
 Use `PlanOrchestrator` when you want the full generate → execute → repair loop
 with structured reporting. The orchestrator automatically:
 
+- compiles each synthesized plan with `javac` and feeds compiler diagnostics
+	back into the planner for up to three refinement rounds,
 - retries failed plans (validation or runtime) with bounded repair hints,
 - captures per-attempt traces/tool usage, and
 - returns a concise human-readable summary you can drop into agent memory.
@@ -291,6 +293,7 @@ orchestrator = PlanOrchestrator(
 	planner,
 	runner_factory=lambda: PlanRunner(),
 	max_retries=2,
+	max_compile_refinements=3,
 )
 
 result = orchestrator.execute_with_retries(
@@ -304,6 +307,9 @@ result = orchestrator.execute_with_retries(
 
 print(result["summary"])          # e.g., "✅ Java plan run – 2 attempt(s) …"
 print(result["telemetry"])        # structured data for logs or analytics
+
+# When testing you can inject a fake compiler to avoid shelling out to javac.
+# In production ensure a JDK is installed so the sanitizer can run.
 ```
 
 When integrating with the agent loop, write `result["summary"]` back to the
@@ -326,7 +332,10 @@ pipeline:
 Agents expose a `plan_max_retries` parameter (CLI/config key
 `plan_max_retries`) that caps orchestrator attempts per user turn. Setting it to
 0 disables retries, while higher values enable the planner to repair invalid or
-failing programs automatically. Because the legacy `agent_execution` and
+failing programs automatically. The orchestrator also accepts
+`max_compile_refinements` (default `3`) to control how many times compiler
+errors are fed back to the planner before giving up. Because the legacy
+`agent_execution` and
 `agent_prompting` modules now raise `RuntimeError` on import, ensure any custom
 agents instantiate `llmflow.core.agent.Agent` directly and configure tool tags
 via `available_tool_tags`/`match_all_tags`.

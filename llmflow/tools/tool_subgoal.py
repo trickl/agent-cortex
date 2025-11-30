@@ -151,7 +151,7 @@ def run_subgoal(
         explicit_tool_names: Optional list of tool names that must be loaded.
         match_all_tags: Whether all tags must match when filtering tools.
         user_prompt: Optional override for the user message sent to the sub-agent.
-        plan_max_retries: Maximum CPL replan attempts for the nested agent.
+        plan_max_retries: Maximum plan retry attempts for the nested agent.
         llm_config_path: Optional custom LLM config path; defaults to llm_config.yaml.
         verbose: Whether to print verbose diagnostics from the nested agent.
 

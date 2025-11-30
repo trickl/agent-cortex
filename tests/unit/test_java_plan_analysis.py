@@ -16,13 +16,13 @@ def test_analyze_plan_captures_syscalls_helpers_and_state():
     public class Plan {
         public void helper(String input) {
             String message = formatter.format(input);
-            syscall.log(message);
+            PlanningToolStubs.log(message);
             record(message);
             message = formatter.format(message);
         }
 
         public void record(String text) {
-            syscall.log(text);
+            PlanningToolStubs.log(text);
         }
 
         public void main() {
@@ -33,10 +33,10 @@ def test_analyze_plan_captures_syscalls_helpers_and_state():
     }
     """
 
-    graph = analyze_java_plan(source)
+    graph = analyze_java_plan(source, tool_stub_class_name="PlanningToolStubs")
     helper = _get_function(graph, "helper")
 
-    assert [call.name for call in helper.syscalls] == ["log"]
+    assert [call.name for call in helper.tool_calls] == ["log"]
     helper_call_names = sorted(call.name for call in helper.helper_calls)
     assert helper_call_names == ["format", "format", "record"]
     assignments = helper.assignments
@@ -55,23 +55,23 @@ def test_analyze_plan_captures_branches_and_exception_handlers():
         public void main() {
             try {
                 if (shouldExecute()) {
-                    syscall.log("run");
+                    PlanningToolStubs.log("run");
                 } else {
-                    syscall.log("skip");
+                    PlanningToolStubs.log("skip");
                 }
                 String label = shouldExecute() ? "yes" : "no";
             } catch (Exception ex) {
-                syscall.log(ex.getMessage());
+                PlanningToolStubs.log(ex.getMessage());
             }
         }
     }
     """
 
-    graph = analyze_java_plan(source)
+    graph = analyze_java_plan(source, tool_stub_class_name="PlanningToolStubs")
     main_fn = _get_function(graph, "main")
 
     assert any(branch.kind == "if" for branch in main_fn.branches)
     assert any(branch.kind == "ternary" for branch in main_fn.branches)
     assert main_fn.exception_handlers[0].error_var == "ex"
-    assert len(main_fn.syscalls) == 3
+    assert len(main_fn.tool_calls) == 3
     assert main_fn.assignments[0].expression.startswith("(shouldExecute() ?")

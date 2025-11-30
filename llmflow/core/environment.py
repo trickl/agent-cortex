@@ -1,7 +1,7 @@
 """Deprecated environment shim kept for compatibility."""
 
 raise RuntimeError(
-    "llmflow.core.environment is no longer part of the CPL agent runtime."
+    "llmflow.core.environment has been removed; the Java plan agent manages tool execution internally."
 )
 from typing import Dict, Any, Callable
 import json

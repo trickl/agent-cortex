@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from llmflow.core.agent import Agent
 
@@ -40,3 +40,17 @@ def test_plan_request_context_skips_system_prompt():
     assert "Please fix the logger again." in request.context
     assert "Working on it." in request.context
     assert "System prompt" not in request.context
+
+
+def test_plan_request_includes_tool_stubs():
+    stub_source = "public final class PlanningToolStubs {}"
+    with patch(
+        "llmflow.core.agent.generate_tool_stub_class",
+        return_value=stub_source,
+    ) as stub_builder:
+        agent = _make_agent()
+        request = agent._build_plan_request("Investigate CI failures")
+
+    stub_builder.assert_called()
+    assert request.tool_stub_source == stub_source
+    assert request.tool_stub_class_name == "PlanningToolStubs"

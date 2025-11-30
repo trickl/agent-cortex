@@ -9,7 +9,7 @@ def test_execute_returns_graph_metadata():
     plan_source = """
     public class Plan {
         public void helper(String message) {
-            syscall.log(message);
+            PlanningToolStubs.log(message);
             return;
         }
 
@@ -19,14 +19,18 @@ def test_execute_returns_graph_metadata():
     }
     """
 
-    result = runner.execute(plan_source, metadata={"request_id": "abc"})
+    result = runner.execute(
+        plan_source,
+        metadata={"request_id": "abc"},
+        tool_stub_class_name="PlanningToolStubs",
+    )
 
     assert result["success"] is True
     assert result["errors"] == []
     assert isinstance(result["graph"], dict)
     assert result["metadata"]["functions"] == 2
     assert result["metadata"]["function_names"] == ["helper", "main"]
-    assert result["metadata"]["syscall_count"] == 1
+    assert result["metadata"]["tool_call_count"] == 1
     assert result["metadata"]["request_id"] == "abc"
 
 
@@ -35,7 +39,7 @@ def test_execute_reports_missing_main():
     plan_source = """
     public class Plan {
         public void helper() {
-            syscall.log("noop");
+            PlanningToolStubs.log("noop");
             return;
         }
     }
@@ -52,7 +56,7 @@ def test_execute_reports_parse_error():
     plan_source = """
     public class Plan {
         public void main( {
-            syscall.log("oops");
+            PlanningToolStubs.log("oops");
         }
     }
     """
@@ -65,7 +69,7 @@ def test_execute_reports_parse_error():
 
 def test_execute_reports_lexer_error_with_markdown_header():
     runner = PlanRunner(specification="SPEC")
-    plan_source = """# Java Planning Specification\npublic class Plan {\n    public void main() {\n        syscall.log(\"noop\");\n    }\n}\n"""
+    plan_source = """# Java Planning Specification\npublic class Plan {\n    public void main() {\n        PlanningToolStubs.log(\"noop\");\n    }\n}\n"""
 
     result = runner.execute(plan_source)
 

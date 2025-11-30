@@ -134,7 +134,7 @@ For YouTube video download and transcription requests:
                 continue
 
             if user_input.lower() == "tools":
-                print("Allowed syscalls:", ai_agent.allowed_syscalls)
+                print("Allowed tools:", getattr(ai_agent, "allowed_tools", []))
                 continue
 
             if not user_input:

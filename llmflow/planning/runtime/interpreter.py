@@ -11,7 +11,6 @@ from .ast import (
     Assign,
     BinaryOp,
     CallExpr,
-    DeferredExecutionOptions,
     Expr,
     ExprStmt,
     ForStmt,
@@ -28,22 +27,11 @@ from .ast import (
     VarDecl,
     VarRef,
 )
-from .parser import parse_java_plan_fragment
 from .validator import PlanValidator, ValidationError
-from ..deferred_planner import (
-    DeferredFunctionContext,
-    DeferredFunctionPrompt,
-    DeferredParameter,
-    prepare_deferred_prompt,
-)
 
 
 class PlanRuntimeError(Exception):
     """Generic runtime error during plan execution."""
-
-
-class DeferredSynthesisError(Exception):
-    """Raised when generating a deferred function body fails."""
 
 
 class ReturnSignal(Exception):
@@ -124,9 +112,6 @@ class PlanInterpreter:
         registry: Optional[SyscallRegistry] = None,
         syscalls: Optional[Dict[str, Callable[..., Any]]] = None,
         tracer: Optional[ExecutionTracer] = None,
-        deferred_planner: Optional[Callable[[DeferredFunctionPrompt], str]] = None,
-        deferred_options: Optional[DeferredExecutionOptions] = None,
-        spec_text: Optional[str] = None,
     ):
         if registry is None and syscalls is None:
             raise ValueError("A syscall mapping or registry must be provided")
@@ -137,9 +122,6 @@ class PlanInterpreter:
         self.syscalls = self.registry.to_dict()
         self.tracer = tracer or ExecutionTracer(enabled=False)
         self._call_stack: List[str] = []
-        self._deferred_planner = deferred_planner
-        self._deferred_options = deferred_options or DeferredExecutionOptions()
-        self._spec_text = spec_text or ""
         self._validate_plan()
 
     def run(self) -> Any:
@@ -170,7 +152,9 @@ class PlanInterpreter:
             except PlanRuntimeError as exc:
                 self._runtime_error(str(exc), node=param)
 
-        body = self._resolve_function_body(fn, args, call_node or fn)
+        if fn.body is None:
+            self._runtime_error(f"Function '{fn.name}' is missing a body", node=call_node or fn)
+        body = fn.body
         self._call_stack.append(name)
         self._trace("function_enter", function=name, args=args, line=fn.line)
         result: Any = None
@@ -187,101 +171,6 @@ class PlanInterpreter:
             self._call_stack.pop()
         return result
 
-    def _resolve_function_body(
-        self,
-        fn: FunctionDef,
-        args: List[Any],
-        error_node: Optional[Any],
-    ) -> List[Stmt]:
-        if fn.is_deferred():
-            if self._deferred_planner is None:
-                self._runtime_error(
-                    f"Deferred function '{fn.name}' cannot run without a planner",
-                    node=error_node,
-                )
-            generated_flag = getattr(fn, "_deferred_generated", False)
-            needs_refresh = (
-                fn.body is None
-                or not generated_flag
-                or not self._deferred_options.reuse_cached_bodies
-            )
-            if needs_refresh:
-                self._trace("deferred_generate_start", function=fn.name)
-                try:
-                    new_body = self._synthesize_deferred_body(fn, args)
-                except DeferredSynthesisError as exc:
-                    self._trace("deferred_generate_error", function=fn.name, error=str(exc))
-                    self._runtime_error(str(exc), node=error_node)
-                fn.body = new_body
-                setattr(fn, "_deferred_generated", True)
-                self._trace("deferred_generate_end", function=fn.name)
-            if fn.body is None:
-                self._runtime_error(
-                    f"Deferred function '{fn.name}' did not produce a body",
-                    node=error_node,
-                )
-            return fn.body
-
-        if fn.body is None:
-            self._runtime_error(f"Function '{fn.name}' is missing a body", node=error_node)
-        return fn.body
-
-    def _synthesize_deferred_body(self, fn: FunctionDef, args: List[Any]) -> List[Stmt]:
-        if self._deferred_planner is None:
-            raise DeferredSynthesisError(
-                f"Deferred function '{fn.name}' requires a planner callback"
-            )
-        context = self._build_deferred_context(fn, args)
-        constraints = self._deferred_options.extra_constraints or None
-        prompt = prepare_deferred_prompt(
-            context=context,
-            specification=self._spec_text,
-            allowed_syscalls=sorted(self.syscalls.keys()),
-            extra_constraints=constraints,
-        )
-        planner_output = self._deferred_planner(prompt)
-        if not isinstance(planner_output, str):
-            raise DeferredSynthesisError(
-                f"Deferred planner must return a string body (got {type(planner_output).__name__})"
-            )
-        body_text = planner_output.strip()
-        if not body_text:
-            raise DeferredSynthesisError(
-                f"Deferred planner returned an empty body for '{fn.name}'"
-            )
-        normalized = self._normalize_body_source(body_text)
-        try:
-            parsed = parse_java_plan_fragment(fn, normalized)
-        except Exception as exc:  # pragma: no cover - upstream parser validates
-            raise DeferredSynthesisError(
-                f"Deferred planner produced invalid syntax for '{fn.name}': {exc}"
-            ) from exc
-        return parsed
-
-    def _build_deferred_context(self, fn: FunctionDef, args: List[Any]) -> DeferredFunctionContext:
-        argument_values = {param.name: value for param, value in zip(fn.params, args)}
-        metadata = dict(self._deferred_options.metadata)
-        parameters = [DeferredParameter(name=param.name, type=param.type) for param in fn.params]
-        return DeferredFunctionContext(
-            function_name=fn.name,
-            return_type=fn.return_type,
-            parameters=parameters,
-            argument_values=argument_values,
-            call_stack=list(self._call_stack),
-            goal_summary=self._deferred_options.goal_summary,
-            extra_metadata=metadata,
-        )
-
-    @staticmethod
-    def _normalize_body_source(body_text: str) -> str:
-        stripped = body_text.strip()
-        if stripped.startswith("{") and stripped.endswith("}"):
-            return stripped
-        if not stripped.startswith("{"):
-            stripped = "{\n" + stripped
-        if not stripped.endswith("}"):
-            stripped = stripped + "\n}"
-        return stripped
 
     # ------------------------------------------------------------------
     # Statement execution
@@ -503,5 +392,4 @@ __all__ = [
     "ExecutionTracer",
     "PlanInterpreter",
     "PlanRuntimeError",
-    "DeferredSynthesisError",
 ]

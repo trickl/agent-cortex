@@ -18,7 +18,7 @@ def test_analyzer_renders_complex_assignments():
             int sum = (left + right);
             int[] results = new int[2];
             results[0] = sum;
-            syscall.log("sum=" + sum);
+            PlanningToolStubs.log("sum=" + sum);
             return sum;
         }
 
@@ -28,21 +28,21 @@ def test_analyzer_renders_complex_assignments():
     }
     """
 
-    graph = analyze_java_plan(source)
+    graph = analyze_java_plan(source, tool_stub_class_name="PlanningToolStubs")
     compute_fn = _find_function(graph, "compute")
     assignments = [assignment.expression for assignment in compute_fn.assignments]
 
     assert "(left + right)" in assignments[0]
     assert assignments[1] == "ArrayCreator"
     assert assignments[2] == "sum"
-    assert compute_fn.syscalls[0].name == "log"
+    assert compute_fn.tool_calls[0].name == "log"
 
 
 def test_graph_dict_contains_helper_metadata():
     source = """
     public class Plan {
         public void helper() {
-            syscall.log("hi");
+            PlanningToolStubs.log("hi");
         }
 
         public void main() {
@@ -51,10 +51,10 @@ def test_graph_dict_contains_helper_metadata():
     }
     """
 
-    graph_dict = analyze_java_plan(source).to_dict()
+    graph_dict = analyze_java_plan(source, tool_stub_class_name="PlanningToolStubs").to_dict()
     functions = {fn["name"]: fn for fn in graph_dict["functions"]}
 
     assert "helper" in functions
-    assert functions["helper"]["syscalls"][0]["name"] == "log"
+    assert functions["helper"]["tool_calls"][0]["name"] == "log"
     main_calls = [call["name"] for call in functions["main"]["helper_calls"]]
     assert main_calls == ["helper"]

@@ -177,10 +177,16 @@ class JavaPlanRequest:
     task: str
     goals: Sequence[str] = field(default_factory=list)
     context: Optional[str] = None
-    allowed_syscalls: Sequence[str] = field(default_factory=list)
+    tool_names: Sequence[str] = field(default_factory=list)
+    tool_schemas: Sequence[Dict[str, Any]] = field(default_factory=list)
     additional_constraints: Sequence[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
     include_deferred_guidance: bool = True
+    tool_stub_source: Optional[str] = None
+    tool_stub_class_name: Optional[str] = None
+    prior_plan_source: Optional[str] = None
+    compile_error_report: Optional[str] = None
+    refinement_iteration: int = 0
 
 
 @dataclass
@@ -248,7 +254,6 @@ class JavaPlanner:
         raw_response: Dict[str, Any]
         notes: Optional[str] = None
         request_start = time.perf_counter()
-        normalized_syscalls = self._normalize_allowed_syscalls(request.allowed_syscalls)
         retries = (
             getattr(self._llm_client.provider, "max_retries", None)
             or getattr(self._llm_client.provider, "default_retries", None)
@@ -256,13 +261,13 @@ class JavaPlanner:
         )
         status_prefix = "[JavaPlanner]"
         print(
-            f"{status_prefix} Requesting structured Java plan (syscalls={normalized_syscalls or ['none']}, retries={retries})",
+            f"{status_prefix} Requesting structured Java plan (tools={request.tool_names or ['none']}, retries={retries})",
             flush=True,
         )
         logger.info(
-            "%s Requesting structured Java plan (syscalls=%s, retries=%s)",
+            "%s Requesting structured Java plan (tools=%s, retries=%s)",
             status_prefix,
-            normalized_syscalls or ["none"],
+            request.tool_names or ["none"],
             retries,
         )
         try:
@@ -311,9 +316,8 @@ class JavaPlanner:
                 notes = payload.notes.strip()
 
         plan_id = str(request.metadata.get("plan_id") or uuid.uuid4())
-        normalized_syscalls = self._normalize_allowed_syscalls(request.allowed_syscalls)
         metadata = dict(request.metadata)
-        metadata.setdefault("allowed_syscalls", normalized_syscalls)
+        metadata.setdefault("allowed_tools", sorted(request.tool_names))
         if notes:
             metadata["planner_notes"] = notes
         return JavaPlanResult(
@@ -372,16 +376,23 @@ class JavaPlanner:
         return normalized, response, None
 
     def _build_messages(self, request: JavaPlanRequest) -> List[Dict[str, Any]]:
-        normalized_syscalls = self._normalize_allowed_syscalls(request.allowed_syscalls)
-        constraint_lines = self._build_constraints(request, normalized_syscalls)
-        system_content = self._build_system_message()
-        user_content = self._build_user_message(request, normalized_syscalls, constraint_lines)
+        has_tools = bool(request.tool_names)
+        constraint_lines = self._build_constraints(request, has_tools)
+        system_content = self._build_system_message(
+            request.tool_stub_source,
+            request.tool_stub_class_name,
+        )
+        user_content = self._build_user_message(request, constraint_lines)
         return [
             {"role": "system", "content": system_content},
             {"role": "user", "content": user_content},
         ]
 
-    def _build_system_message(self) -> str:
+    def _build_system_message(
+        self,
+        tool_stub_source: Optional[str] = None,
+        tool_stub_class_name: Optional[str] = None,
+    ) -> str:
         header = (
             "You are the Java plan synthesizer."
             " Produce a single Java class that fully solves the user's task."
@@ -410,14 +421,35 @@ class JavaPlanner:
             },
             indent=2,
         )
-        return (
+        message = (
             f"{header}\n\n{schema_guidance}\n\n<available_tools>\n{tools_block}\n</available_tools>"
         ).strip()
+
+        if tool_stub_source:
+            stub_intro = [
+                "Tool stub reference: Use the provided Java class when calling tools.",
+            ]
+            if tool_stub_class_name:
+                stub_intro.append(
+                    f"Call the static methods defined on `{tool_stub_class_name}` instead of inventing new signatures."
+                )
+            stub_intro_text = " ".join(stub_intro).strip()
+            stub_block = textwrap.dedent(
+                f"""
+                {stub_intro_text}
+
+                <tool_stubs>
+                {tool_stub_source.strip()}
+                </tool_stubs>
+                """
+            ).strip()
+            message = f"{message}\n\n{stub_block}".strip()
+
+        return message
 
     def _build_user_message(
         self,
         request: JavaPlanRequest,
-        normalized_syscalls: Sequence[str],
         constraint_lines: Sequence[str],
     ) -> str:
         lines: List[str] = []
@@ -436,13 +468,19 @@ class JavaPlanner:
             lines.append(textwrap.dedent(request.context).strip())
             lines.append("")
 
-        lines.append("Allowed syscalls:")
-        if normalized_syscalls:
-            for name in normalized_syscalls:
-                lines.append(f"- {name}")
+        lines.append("Available planning tools:")
+        tool_entries = _summarize_tools(request.tool_schemas, request.tool_names)
+        if tool_entries:
+            lines.extend(tool_entries)
         else:
             lines.append("- (none registered)")
         lines.append("")
+
+        if request.tool_stub_class_name:
+            lines.append(
+                f"Use the static methods on {request.tool_stub_class_name} to invoke these tools; do not invent other APIs."
+            )
+            lines.append("")
 
         lines.append("Constraints:")
         for rule in constraint_lines:
@@ -451,6 +489,22 @@ class JavaPlanner:
             for rule in request.additional_constraints:
                 lines.append(f"- {rule}")
         lines.append("")
+
+        if request.prior_plan_source:
+            lines.append("Previous plan attempt:")
+            lines.append("```java")
+            lines.append(request.prior_plan_source.strip())
+            lines.append("```")
+            lines.append("")
+
+        if request.compile_error_report:
+            lines.append("Compile diagnostics:")
+            lines.append(request.compile_error_report.strip())
+            lines.append("")
+            lines.append(
+                "Revise the plan to satisfy the Java planning specification and resolve each diagnostic above."
+            )
+            lines.append("")
 
         lines.append(
             "Output requirements: respond with only the Java source, preferably via the"
@@ -461,27 +515,21 @@ class JavaPlanner:
     def _build_constraints(
         self,
         request: JavaPlanRequest,
-        normalized_syscalls: Sequence[str],
+        has_tools: bool,
     ) -> List[str]:
+        stub_name = request.tool_stub_class_name or "PlanningToolStubs"
         constraints = [
             "Emit exactly one top-level Java class (any name) with helper methods and a main() entrypoint when needed.",
-            "Use only the provided syscall names via the `syscall.<name>(...)` helper, keeping tool calls at the leaves.",
+            f"Call tools exclusively via the `{stub_name}.<name>(...)` static helpers; never invent new APIs.",
             "Limit every helper body to seven statements and ensure each helper is more specific than its caller.",
-            "Stick to the allowed statement types (variable declarations, assignments, helper/syscall calls, if/else, enhanced for, try/catch, returns).",
+            "Stick to the allowed statement types (variable declarations, assignments, helper/tool calls, if/else, enhanced for, try/catch, returns).",
             "Do not wrap the output in markdown; Java comments and imports are allowed but avoid prose explanations.",
         ]
-        if not normalized_syscalls:
+        if not has_tools:
             constraints.append(
-                "If no syscalls are available, describe diagnostic steps using logging and TODOs."
+                "If no planning tools are available, describe diagnostic steps using logging and TODOs."
             )
         return constraints
-
-    @staticmethod
-    def _normalize_allowed_syscalls(allowed: Sequence[str] | None) -> List[str]:
-        if not allowed:
-            return []
-        deduped = {name.strip() for name in allowed if name and name.strip()}
-        return sorted(deduped)
 
     @staticmethod
     def _load_specification(
@@ -523,6 +571,31 @@ class JavaPlanner:
                 },
             },
         }
+
+
+def _summarize_tools(
+    tool_schemas: Sequence[Dict[str, Any]],
+    fallback_names: Sequence[str],
+) -> List[str]:
+    entries: List[str] = []
+    seen_names: set[str] = set()
+    for schema in tool_schemas:
+        if not isinstance(schema, dict):
+            continue
+        function_meta = schema.get("function") or {}
+        name = function_meta.get("name")
+        if not name or name in seen_names:
+            continue
+        description = function_meta.get("description") or "No description provided."
+        entries.append(f"- {name}: {description}".strip())
+        seen_names.add(name)
+    if entries:
+        return entries
+    deduped_names = []
+    for name in fallback_names:
+        if name and name not in deduped_names:
+            deduped_names.append(name)
+    return [f"- {name}" for name in deduped_names]
 
 
 __all__ = [

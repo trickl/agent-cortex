@@ -30,11 +30,12 @@ class PlanRunner:
         goal_summary: Optional[str] = None,
         deferred_metadata: Optional[Dict[str, Any]] = None,
         deferred_constraints: Optional[Sequence[str]] = None,
+        tool_stub_class_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         del capture_trace, goal_summary, deferred_metadata, deferred_constraints
         metadata_payload = dict(metadata or {})
         try:
-            graph = analyze_java_plan(plan_source)
+            graph = analyze_java_plan(plan_source, tool_stub_class_name=tool_stub_class_name)
         except (javalang.parser.JavaSyntaxError, javalang.tokenizer.LexerError) as exc:
             error = _format_parse_error(exc)
             return {
@@ -62,7 +63,7 @@ class PlanRunner:
         function_names = [fn.name for fn in graph.functions]
         metadata_payload.setdefault("functions", len(function_names))
         metadata_payload["function_names"] = function_names
-        metadata_payload["syscall_count"] = sum(len(fn.syscalls) for fn in graph.functions)
+        metadata_payload["tool_call_count"] = sum(len(fn.tool_calls) for fn in graph.functions)
         return {
             "success": not validation_errors,
             "errors": validation_errors,

@@ -25,9 +25,9 @@ _FORCE_GRANITE_TESTS = os.getenv("LLMFLOW_FORCE_GRANITE_TESTS", "").lower() in {
 _AGENT_TASK_HEADER = (
     "Create a Java class named Planner that carries out the user's request. "
     "Keep the structure minimal, lean on helper methods for decomposition, and "
-    "use allowed syscalls only when a step can be executed directly."
+    "invoke available planning tools via the stub class whenever a step can be executed directly."
 )
-_AGENT_STYLE_SYSCALLS = [
+_AGENT_STYLE_TOOLS = [
     "log",
     "listFilesInTree",
     "readTextFile",
@@ -95,14 +95,14 @@ _COMPLEXITY_SCENARIOS = [
         "name": "minimal_smoke",
         "task": (
             "Draft a Java class named PlanSteps that logs three numbered remediation steps "
-            "using syscall.log and leaves TODO comments for any shell commands."
+            "using PlanningToolStubs.log and leaves TODO comments for any shell commands."
         ),
         "context": (
-            "You must call syscall.log at least once."
+            "You must call PlanningToolStubs.log at least once."
             "Respond using the define_java_plan schema only."
         ),
         "goals": ["Summarize a remediation workflow"],
-        "allowed_syscalls": ["log"],
+        "allowed_tools": ["log"],
         "metadata": {"plan_id": "granite-structured-smoke"},
     },
     {
@@ -121,10 +121,10 @@ _COMPLEXITY_SCENARIOS = [
             "Surface unmerged branches",
             "Log remediation notes",
         ],
-        "allowed_syscalls": _AGENT_STYLE_SYSCALLS[:4],
+        "allowed_tools": _AGENT_STYLE_TOOLS[:4],
         "metadata": {"plan_id": "granite-agent-lite"},
         "additional_constraints": [
-            "Ensure each helper calls either another helper or an allowed syscall.",
+            "Ensure each helper calls either another helper or an allowed planning tool.",
             "Limit helper bodies to at most seven statements.",
         ],
     },
@@ -135,9 +135,9 @@ _COMPLEXITY_SCENARIOS = [
             "only after updating documentation entries."
         ),
         "context": _agent_style_context(
-            "Previous plan summarized multiple tool errors; new attempt must avoid redundant syscalls.",
+            "Previous plan summarized multiple tool errors; new attempt must avoid redundant tool calls.",
             (
-                ("user", "Focus on the logging plus git syscalls; no shell access."),
+                ("user", "Focus on the logging plus git tools; no shell access."),
                 ("assistant", "Will rely on structured plan execution."),
                 ("user", "Remember to leave TODOs for unclear sections."),
             ),
@@ -147,12 +147,12 @@ _COMPLEXITY_SCENARIOS = [
             "Update relevant documentation",
             "Stage and summarize changes",
         ],
-        "allowed_syscalls": _AGENT_STYLE_SYSCALLS,
+        "allowed_tools": _AGENT_STYLE_TOOLS,
         "metadata": {"plan_id": "granite-agent-full"},
         "additional_constraints": [
             "Follow the Java planning specification strictly, emitting only one top-level class.",
             "Prefer helper decomposition depth of at least three levels.",
-            "If a syscall cannot run, add TODO comments documenting the gap.",
+            "If a tool cannot run, add TODO comments documenting the gap.",
         ],
     },
 ]
@@ -179,13 +179,13 @@ def test_granite_structured_java_plan_levels(scenario: dict[str, object]) -> Non
         task=scenario["task"],
         context=scenario.get("context"),
         goals=scenario.get("goals", []),
-        allowed_syscalls=scenario.get("allowed_syscalls", ["log"]),
+        tool_names=scenario.get("allowed_tools", ["log"]),
         additional_constraints=scenario.get("additional_constraints", []),
         metadata=scenario.get("metadata", {}),
     )
 
     print(
-        f"[Granite] Running scenario '{scenario['name']}' with syscalls={request.allowed_syscalls}",
+        f"[Granite] Running scenario '{scenario['name']}' with tools={request.tool_names}",
         flush=True,
     )
     result = planner.generate_plan(request)

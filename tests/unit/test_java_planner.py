@@ -6,7 +6,7 @@ from llmflow.planning import JavaPlanRequest, JavaPlanner, JavaPlanningError
 JAVA_PLAN = """
 public class Plan {
     public void main() {
-        syscall.log("hello");
+        PlanningToolStubs.log("hello");
         return;
     }
 }
@@ -38,13 +38,14 @@ def test_planner_builds_prompt_and_returns_plan():
         task="Fix the reported lint issue",
         goals=["Diagnose the lint failure", "Apply a minimal patch"],
         context="Repository: example, Branch: main",
-        allowed_syscalls=["log", "cloneRepo"],
+        tool_names=["log", "cloneRepo"],
+        tool_stub_class_name="PlanningToolStubs",
     )
 
     result = planner.generate_plan(request)
 
     assert result.plan_source.startswith("public class Plan")
-    assert result.metadata["allowed_syscalls"] == ["cloneRepo", "log"]
+    assert result.metadata["allowed_tools"] == ["cloneRepo", "log"]
     assert "available_tools" in client.messages[0]["content"]
     assert "cloneRepo" in client.messages[1]["content"]
     tool_choice = client.kwargs.get("tool_choice")
@@ -76,3 +77,39 @@ def test_planner_raises_when_java_missing():
 
     with pytest.raises(JavaPlanningError):
         planner.generate_plan(JavaPlanRequest(task="Summarize"))
+
+
+def test_planner_includes_tool_stubs_in_system_prompt():
+    client = DummyLLMClient({"java": JAVA_PLAN})
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
+    stub_source = "public final class DemoTools { public static void call() {} }"
+
+    planner.generate_plan(
+        JavaPlanRequest(
+            task="Do work",
+            tool_stub_source=stub_source,
+            tool_stub_class_name="DemoTools",
+        )
+    )
+
+    system_message = client.messages[0]["content"]
+    assert "<tool_stubs>" in system_message
+    assert "DemoTools" in system_message
+    assert stub_source in system_message
+
+
+def test_planner_includes_refinement_context_in_user_prompt():
+    client = DummyLLMClient({"java": JAVA_PLAN})
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
+    request = JavaPlanRequest(
+        task="Do work",
+        prior_plan_source="public class Bad { void main() {} }",
+        compile_error_report="1. Missing syscall",
+    )
+
+    planner.generate_plan(request)
+
+    user_message = client.messages[1]["content"]
+    assert "Previous plan attempt" in user_message
+    assert "Compile diagnostics" in user_message
+    assert "Missing syscall" in user_message

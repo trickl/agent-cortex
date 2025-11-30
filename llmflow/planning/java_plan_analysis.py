@@ -8,8 +8,8 @@ import javalang
 
 
 @dataclass
-class SyscallInvocation:
-    """Represents a direct syscall.* invocation discovered in the plan."""
+class ToolInvocation:
+    """Represents a direct planning tool invocation discovered in the plan."""
 
     name: str
     args: List[str]
@@ -106,7 +106,7 @@ class FunctionSummary:
     name: str
     params: List[str]
     return_type: Optional[str]
-    syscalls: List[SyscallInvocation] = field(default_factory=list)
+    tool_calls: List[ToolInvocation] = field(default_factory=list)
     helper_calls: List[HelperInvocation] = field(default_factory=list)
     assignments: List[StateAssignment] = field(default_factory=list)
     branches: List[BranchSummary] = field(default_factory=list)
@@ -117,7 +117,7 @@ class FunctionSummary:
             "name": self.name,
             "params": list(self.params),
             "return_type": self.return_type,
-            "syscalls": [call.to_dict() for call in self.syscalls],
+            "tool_calls": [call.to_dict() for call in self.tool_calls],
             "helper_calls": [call.to_dict() for call in self.helper_calls],
             "assignments": [assignment.to_dict() for assignment in self.assignments],
             "branches": [branch.to_dict() for branch in self.branches],
@@ -139,15 +139,21 @@ class JavaPlanGraph:
         }
 
 
-def analyze_java_plan(source: str) -> JavaPlanGraph:
-    """Parse ``source`` and extract helper/syscall relationships."""
+def analyze_java_plan(
+    source: str,
+    tool_stub_class_name: Optional[str] = None,
+) -> JavaPlanGraph:
+    """Parse ``source`` and extract helper/tool relationships."""
 
     tree = javalang.parse.parse(source)
     class_decl = _select_plan_class(tree.types)
     source_lines = source.splitlines()
     functions: List[FunctionSummary] = []
+    qualifiers = {"syscall"}
+    if tool_stub_class_name:
+        qualifiers.add(tool_stub_class_name)
     for method in class_decl.methods:
-        functions.append(_summarize_method(method, source_lines))
+        functions.append(_summarize_method(method, source_lines, qualifiers))
     return JavaPlanGraph(class_name=class_decl.name, functions=functions)
 
 
@@ -164,6 +170,7 @@ def _select_plan_class(types: Sequence[Any]) -> javalang.tree.ClassDeclaration:
 def _summarize_method(
     method: javalang.tree.MethodDeclaration,
     source_lines: Sequence[str],
+    tool_qualifiers: Sequence[str],
 ) -> FunctionSummary:
     params = [param.name for param in method.parameters]
     summary = FunctionSummary(
@@ -174,13 +181,15 @@ def _summarize_method(
     if method.body is None:
         return summary
 
+    normalized_qualifiers = {qualifier.split(".")[-1] for qualifier in tool_qualifiers}
     for _, node in method.filter(javalang.tree.MethodInvocation):
         args = [_render_expression(arg) for arg in (node.arguments or [])]
         line, column = _node_position(node)
         comment = _extract_leading_comment(source_lines, line)
-        if node.qualifier == "syscall":
-            summary.syscalls.append(
-                SyscallInvocation(
+        qualifier = (node.qualifier or "").split(".")[-1]
+        if qualifier in normalized_qualifiers:
+            summary.tool_calls.append(
+                ToolInvocation(
                     name=node.member,
                     args=args,
                     line=line,
@@ -351,7 +360,7 @@ __all__ = [
     "FunctionSummary",
     "JavaPlanGraph",
     "StateAssignment",
-    "SyscallInvocation",
+    "ToolInvocation",
     "HelperInvocation",
     "analyze_java_plan",
 ]

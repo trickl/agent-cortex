@@ -15,29 +15,29 @@ _SAMPLE_PLAN = dedent(
 
         public static void repairLintIssue() {
             // Step 1: Prepare the workspace and create a feature branch
-            createBranch();
+            PlanningToolStubs.createBranch();
 
             // Step 2: Clone or checkout the repository
-            cloneRepo();
+            PlanningToolStubs.cloneRepo();
 
             // Step 3: Retrieve the first open lint issue from Qlty tools
-            applyTextRewrite();
-            qltyGetFirstIssue();
-            String lintIssueId = readTextFile("queries/qlty_llvm-lint_results.md");
+            PlanningToolStubs.applyTextRewrite();
+            PlanningToolStubs.qltyGetFirstIssue();
+            String lintIssueId = PlanningToolStubs.readTextFile("queries/qlty_llvm-lint_results.md");
 
             // Step 4: Understand the issue details for the parse error on line 7
-            runUnderstandIssueSubgoal(lintIssueId);
+            PlanningToolStubs.runUnderstandIssueSubgoal(lintIssueId);
 
             // Step 5: Apply changes to resolve the parse error
-            applyTextRewrite();
+            PlanningToolStubs.applyTextRewrite();
 
             // Step 6: Verify the fix with tests and commit evidence
-            getUncommittedChanges();
-            commitChanges();
-            pushBranch();
+            PlanningToolStubs.getUncommittedChanges();
+            PlanningToolStubs.commitChanges();
+            PlanningToolStubs.pushBranch();
 
             // Step 7: Finalize by opening a pull request summarizing the delivery
-            createPullRequest();
+            PlanningToolStubs.createPullRequest();
         }
     }
     """
@@ -45,11 +45,14 @@ _SAMPLE_PLAN = dedent(
 
 
 def test_navigator_extracts_first_subgoal_comment() -> None:
-    navigator = JavaPlanNavigator.from_source(_SAMPLE_PLAN)
+    navigator = JavaPlanNavigator.from_source(
+        _SAMPLE_PLAN,
+        tool_stub_class_name="PlanningToolStubs",
+    )
     intent = navigator.next_subgoal()
 
     assert intent is not None
-    assert intent.action_kind == "helper"
+    assert intent.action_kind == "tool"
     assert intent.action_name == "createBranch"
     assert intent.parent_function == "repairLintIssue"
     assert intent.goal.lower().startswith("step 1")

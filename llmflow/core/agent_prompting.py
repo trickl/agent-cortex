@@ -1,7 +1,7 @@
-"""Legacy prompt helper removed in CPL agent."""
+"""Legacy prompt helper removed in favor of the Java plan agent."""
 
 raise RuntimeError(
-    "llmflow.core.agent_prompting has been retired; prompts are built inside the CPL-based Agent."
+    "llmflow.core.agent_prompting has been retired; prompts now live inside the Java-plan Agent."
 )
 
 import time

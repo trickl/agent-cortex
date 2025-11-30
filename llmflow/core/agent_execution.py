@@ -1,7 +1,7 @@
-"""Legacy execution mixin removed in favor of CPL planning."""
+"""Legacy execution mixin removed in favor of the Java plan workflow."""
 
 raise RuntimeError(
-    "llmflow.core.agent_execution is no longer supported; use the CPL-based Agent implementation."
+    "llmflow.core.agent_execution is no longer supported; use the Java plan Agent implementation."
 )
 
 import json

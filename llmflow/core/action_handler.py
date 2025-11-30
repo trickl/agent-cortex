@@ -1,13 +1,13 @@
 """
 Deprecated ActionHandler module kept for backwards compatibility imports.
 
-The CPL-native agent no longer executes tools directly from LLM responses, so
-this module is intentionally disabled. Importing it now raises at import time to
-surface the migration requirement immediately.
+The modern Java plan agent no longer executes tools directly from raw LLM
+responses, so this module is intentionally disabled. Importing it raises at
+import time to surface the migration requirement immediately.
 """
 
 raise RuntimeError(
-    "llmflow.core.action_handler has been removed; migrate to the CPL planning pipeline."
+    "llmflow.core.action_handler has been removed; migrate to the Java plan pipeline."
 )
 
 import json

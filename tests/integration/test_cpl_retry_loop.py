@@ -2,8 +2,22 @@ from __future__ import annotations
 
 from typing import List
 
-from llmflow.planning import JavaPlanRequest, JavaPlanner, PlanOrchestrator
+from llmflow.planning import (
+    JavaCompilationResult,
+    JavaPlanRequest,
+    JavaPlanner,
+    PlanOrchestrator,
+)
 from llmflow.planning.plan_runner import PlanRunner
+_TOOL_STUB = """
+@SuppressWarnings("unused")
+public final class PlanningToolStubs {
+    private PlanningToolStubs() {}
+
+    public static void log(String message) {}
+}
+""".strip()
+
 
 
 class SequenceLLMClient:
@@ -12,6 +26,7 @@ class SequenceLLMClient:
     def __init__(self, responses):
         self._responses = list(responses)
         self.calls = 0
+        self.provider = type("Provider", (), {"max_retries": 0})()
 
     def structured_generate(self, *, messages, response_model, **kwargs):
         if not self._responses:
@@ -20,12 +35,17 @@ class SequenceLLMClient:
         payload = self._responses.pop(0)
         return response_model(**payload)
 
+
+class AlwaysSuccessfulCompiler:
+    def compile(self, plan_source: str, **kwargs) -> JavaCompilationResult:
+        return JavaCompilationResult(success=True, command=("javac",), stdout="", stderr="")
+
 def test_java_retry_loop_end_to_end():
     first_plan_missing_main = {
         "java": """
         public class Plan {
             public void helper() {
-                syscall.log("noop");
+                PlanningToolStubs.log("noop");
                 return;
             }
         }
@@ -35,7 +55,7 @@ def test_java_retry_loop_end_to_end():
         "java": """
         public class Plan {
             public void main() {
-                syscall.log("success");
+                PlanningToolStubs.log("success");
                 return;
             }
         }
@@ -50,9 +70,16 @@ def test_java_retry_loop_end_to_end():
             specification="SPEC",
         ),
         max_retries=1,
+        plan_compiler=AlwaysSuccessfulCompiler(),
     )
 
-    request = JavaPlanRequest(task="Demonstrate retry", goals=["ship"])
+    request = JavaPlanRequest(
+        task="Demonstrate retry",
+        goals=["ship"],
+        tool_names=["log"],
+        tool_stub_class_name="PlanningToolStubs",
+        tool_stub_source=_TOOL_STUB,
+    )
 
     result = orchestrator.execute_with_retries(request, capture_trace=True)
 

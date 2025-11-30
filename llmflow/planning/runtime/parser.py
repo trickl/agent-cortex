@@ -5,7 +5,6 @@ import javalang
 from typing import Any, Dict, Iterable, List, Optional
 
 from .ast import (
-    Annotation,
     Assign,
     BinaryOp,
     CallExpr,
@@ -57,21 +56,6 @@ def parse_java_plan(source: str) -> Plan:
     return Plan(functions=fn_map, ordered_functions=functions, line=class_decl.position.line if class_decl.position else None)
 
 
-def parse_java_plan_fragment(fn: FunctionDef, body_source: str) -> List[Stmt]:
-    params = ", ".join(f"{param.type} {param.name}" for param in fn.params)
-    return_type = fn.return_type or "void"
-    class_source = (
-        "public class DeferredPlan {\n"
-        f"    public {return_type} {fn.name}({params}) {body_source}\n"
-        "}\n"
-    )
-    plan = parse_java_plan(class_source)
-    generated = plan.functions.get(fn.name)
-    if generated is None or generated.body is None:
-        raise PlanParseError(f"Deferred body for '{fn.name}' did not parse")
-    return generated.body
-
-
 def _extract_plan_class(types: Iterable[Any]):
     classes = [type_node for type_node in types if isinstance(type_node, javalang.tree.ClassDeclaration)]
     if not classes:
@@ -83,7 +67,6 @@ def _extract_plan_class(types: Iterable[Any]):
 
 
 def _convert_method(method: javalang.tree.MethodDeclaration) -> FunctionDef:
-    annotations = [_convert_annotation(ann) for ann in method.annotations or []]
     params = [_convert_param(param) for param in method.parameters]
     return_type = _type_to_name(method.return_type)
     body: Optional[List[Stmt]] = None
@@ -95,22 +78,9 @@ def _convert_method(method: javalang.tree.MethodDeclaration) -> FunctionDef:
         params=params,
         return_type=return_type,
         body=body,
-        annotations=annotations,
         line=line,
         column=column,
     )
-
-
-def _convert_annotation(annotation: javalang.tree.Annotation) -> Annotation:
-    args: List[Any] = []
-    element = getattr(annotation, "element", None)
-    if element is not None:
-        if isinstance(element, list):
-            args = [_literal_value(item.value) for item in element]
-        else:
-            args = [_literal_value(element.value)]
-    line, column = _node_position(annotation)
-    return Annotation(name=annotation.name, args=args, line=line, column=column)
 
 
 def _convert_param(param: javalang.tree.FormalParameter) -> Param:
@@ -338,5 +308,4 @@ def _node_position(node: Any) -> tuple[Optional[int], Optional[int]]:
 __all__ = [
     "PlanParseError",
     "parse_java_plan",
-    "parse_java_plan_fragment",
 ]

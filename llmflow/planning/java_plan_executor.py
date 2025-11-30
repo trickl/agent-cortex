@@ -8,7 +8,7 @@ from .java_plan_analysis import (
     HelperInvocation,
     JavaPlanGraph,
     FunctionSummary,
-    SyscallInvocation,
+    ToolInvocation,
     analyze_java_plan,
 )
 
@@ -35,8 +35,13 @@ class JavaPlanNavigator:
         self._functions: Dict[str, FunctionSummary] = {fn.name: fn for fn in graph.functions}
 
     @classmethod
-    def from_source(cls, plan_source: str) -> "JavaPlanNavigator":
-        graph = analyze_java_plan(plan_source)
+    def from_source(
+        cls,
+        plan_source: str,
+        *,
+        tool_stub_class_name: Optional[str] = None,
+    ) -> "JavaPlanNavigator":
+        graph = analyze_java_plan(plan_source, tool_stub_class_name=tool_stub_class_name)
         return cls(graph)
 
     def next_subgoal(self) -> Optional[PlanSubgoalIntent]:
@@ -68,21 +73,21 @@ class JavaPlanNavigator:
 
     @staticmethod
     def _should_inline(function: FunctionSummary) -> bool:
-        return len(function.helper_calls) == 1 and not function.syscalls
+        return len(function.helper_calls) == 1 and not function.tool_calls
 
     @staticmethod
     def _pick_first_invocation(
         function: FunctionSummary,
-    ) -> Optional[Tuple[str, HelperInvocation | SyscallInvocation]]:
-        candidates: List[Tuple[str, HelperInvocation | SyscallInvocation]] = []
+    ) -> Optional[Tuple[str, HelperInvocation | ToolInvocation]]:
+        candidates: List[Tuple[str, HelperInvocation | ToolInvocation]] = []
         for call in function.helper_calls:
             candidates.append(("helper", call))
-        for call in function.syscalls:
-            candidates.append(("syscall", call))
+        for call in function.tool_calls:
+            candidates.append(("tool", call))
         if not candidates:
             return None
 
-        def _key(item: Tuple[str, HelperInvocation | SyscallInvocation]) -> Tuple[int, int]:
+        def _key(item: Tuple[str, HelperInvocation | ToolInvocation]) -> Tuple[int, int]:
             _, call = item
             line = call.line if call.line is not None else 10**9
             column = call.column if call.column is not None else 10**9
@@ -94,7 +99,7 @@ class JavaPlanNavigator:
     def _intent_from_invocation(
         self,
         kind: str,
-        call: HelperInvocation | SyscallInvocation,
+        call: HelperInvocation | ToolInvocation,
         parent_function: str,
     ) -> PlanSubgoalIntent:
         summary = call.comment or self._default_goal(kind, call.name)
@@ -111,8 +116,8 @@ class JavaPlanNavigator:
 
     @staticmethod
     def _default_goal(kind: str, name: str) -> str:
-        if kind == "syscall":
-            return f"Call syscall.{name}"
+        if kind == "tool":
+            return f"Call planning tool {name}"
         return f"Execute helper {name}"
 
 

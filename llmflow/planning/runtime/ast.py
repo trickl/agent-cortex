@@ -1,7 +1,7 @@
 """AST primitives for Java-based plans."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 
@@ -14,36 +14,13 @@ class Plan:
 
 
 @dataclass
-class DeferredExecutionOptions:
-    reuse_cached_bodies: bool = True
-    goal_summary: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    extra_constraints: List[str] = field(default_factory=list)
-
-
-@dataclass
-class Annotation:
-    name: str
-    args: List[Any]
-    line: Optional[int] = None
-    column: Optional[int] = None
-
-    def matches(self, target: str) -> bool:
-        return self.name == target
-
-
-@dataclass
 class FunctionDef:
     name: str
     params: List["Param"]
     return_type: str
     body: Optional[List["Stmt"]]
-    annotations: List[Annotation] = field(default_factory=list)
     line: Optional[int] = None
     column: Optional[int] = None
-
-    def is_deferred(self) -> bool:
-        return any(annotation.name == "Deferred" for annotation in self.annotations)
 
 
 @dataclass
@@ -174,11 +151,9 @@ class BinaryOp(Expr):
 
 
 __all__ = [
-    "Annotation",
     "Assign",
     "BinaryOp",
     "CallExpr",
-    "DeferredExecutionOptions",
     "Expr",
     "ExprStmt",
     "ForStmt",

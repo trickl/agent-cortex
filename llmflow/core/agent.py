@@ -8,25 +8,34 @@ from LLM responses, the agent now:
 2. Executes the plan via :class:`~llmflow.planning.plan_runner.PlanRunner`.
 3. Surfaces the orchestrator summary (or plan return value) back to the user.
 
-Tool exposure is controlled through syscall whitelists derived from the default
-syscall registry or filtered via tool tags. Conversation memory is retained for
-traceability, but the execution flow is entirely plan-driven.
+Tool exposure is controlled through PlanningToolStubs generated from the
+registered planning tools, optionally filtered via tool tags. Conversation
+memory is retained for traceability, but the execution flow is entirely
+plan-driven.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set
-
-from llmflow.runtime.syscalls import build_default_syscall_registry
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from llmflow.llm_client import LLMClient
 from llmflow.logging_utils import RunArtifactManager, RunLogContext
-from llmflow.planning import JavaPlanner, JavaPlanRequest, PlanOrchestrator
+from llmflow.planning import (
+    JavaPlanner,
+    JavaPlanRequest,
+    PlanOrchestrator,
+    ToolStubGenerationError,
+    generate_tool_stub_class,
+)
 from llmflow.planning.plan_runner import PlanRunner
 from llmflow.telemetry.mermaid_recorder import MermaidSequenceRecorder
 from llmflow.tools import get_module_for_tool_name, load_tool_module
-from llmflow.tools.tool_registry import get_tool_schema, get_tool_tags
+from llmflow.tools.tool_registry import (
+    get_tool_schema,
+    get_tool_tags,
+    get_tools_by_tags,
+)
 
 from .agent_instrumentation import AgentInstrumentationMixin
 from .goals import GoalManager
@@ -34,11 +43,10 @@ from .memory import Memory
 
 
 _JAVA_PLANNING_GUIDANCE = (
-    "Create Java code to accomplish the user's task, you may only emit Java source code." \
-    "You may only call syscalls that are explicitly allowed. You may comment out function bodies " \
-    "for implementation later if they cannot be defined using an allowed syscall." \
-    "The goal is to draft a plan for execution where details can be defined later, but if " \
-    "it is possible to achieve the functionality using a syscall, you should do so."
+    "Create Java code to accomplish the user's task and emit only Java source."\
+    "Use the provided PlanningToolStubs class to invoke the registered planning tools."\
+    "Comment out helper bodies when a step cannot yet be implemented, but prefer concrete tool "\
+    "calls whenever a registered tool can perform the work."
 )
 _SYSTEM_PROMPT_TEMPLATE = (
     "{{ base_prompt }}\n\n"
@@ -49,35 +57,11 @@ _SYSTEM_PROMPT_PREVIEW = (
     "{{ planning_guidance }}"
 )
 
-
-_SYS_CALL_TOOL_MAP: Dict[str, Optional[str]] = {
-    "log": None,
-    "listFilesInTree": "list_files_in_tree",
-    "readTextFile": "read_text_file",
-    "overwriteTextFile": "overwrite_text_file",
-    "applyTextRewrite": "apply_text_rewrite",
-    "cloneRepo": "git_clone_repository",
-    "createBranch": "git_create_branch",
-    "suggestBranchName": "git_suggest_branch_name",
-    "switchBranch": "git_switch_branch",
-    "stagePaths": "git_stage_paths",
-    "commitChanges": "git_commit_changes",
-    "getUncommittedChanges": "git_get_uncommitted_changes",
-    "pushBranch": "git_push_branch",
-    "createPullRequest": "git_create_pull_request",
-    "qltyListIssues": "qlty_list_issues",
-    "qltyGetFirstIssue": "qlty_get_first_issue",
-    "runSubgoal": "run_subgoal",
-    "runFetchIssueSubgoal": "run_fetch_issue_subgoal",
-    "runPrepareWorkspaceSubgoal": "run_prepare_workspace_subgoal",
-    "runUnderstandIssueSubgoal": "run_understand_issue_subgoal",
-    "runPatchIssueSubgoal": "run_patch_issue_subgoal",
-    "runFinalizeIssueSubgoal": "run_finalize_issue_subgoal",
-}
+_TOOL_STUB_CLASS_NAME = "PlanningToolStubs"
 
 
 class Agent(AgentInstrumentationMixin):
-    """Goal-aware Java plan orchestrator with syscall filtering."""
+    """Goal-aware Java plan orchestrator that scopes tool usage via stubs."""
 
     _MAX_CONTEXT_TRACE = 100
 
@@ -86,13 +70,12 @@ class Agent(AgentInstrumentationMixin):
         llm_client: LLMClient,
         system_prompt: str = (
             "You are a helpful AI assistant. You coordinate structured Java plans to solve user"
-            " requests using the available syscalls."
+            " requests using the available planning tools."
         ),
         initial_goals: Optional[List[Dict[str, Any]]] = None,
         available_tool_tags: Optional[List[str]] = None,
         match_all_tags: bool = True,
-        allowed_syscalls: Optional[Sequence[str]] = None,
-        registry_factory: Optional[Callable[[], Any]] = None,
+        allowed_tools: Optional[Sequence[str]] = None,
         runner_factory: Optional[Callable[[], PlanRunner]] = None,
         planner: Optional[JavaPlanner] = None,
         plan_max_retries: int = 1,
@@ -114,7 +97,6 @@ class Agent(AgentInstrumentationMixin):
         self.current_iteration = 0
         self._capture_trace = capture_trace
         self.plan_max_retries = max(plan_max_retries, 0)
-        self._registry_factory = registry_factory or build_default_syscall_registry
         self._planner = planner or JavaPlanner(llm_client)
         if runner_factory is not None:
             self._runner_factory = runner_factory
@@ -126,14 +108,19 @@ class Agent(AgentInstrumentationMixin):
             max_retries=self.plan_max_retries,
         )
 
-        available_syscalls = self._discover_syscalls()
-        self.allowed_syscalls = self._resolve_allowed_syscalls(
-            available_syscalls,
-            allowed_syscalls,
+        available_tool_names = self._discover_tool_names(
             available_tool_tags,
             match_all_tags,
         )
-        self.active_tools_schemas = self._build_tool_schemas(self.allowed_syscalls)
+        self.allowed_tools = self._resolve_allowed_tools(
+            available_tool_names,
+            allowed_tools,
+        )
+        if not self.allowed_tools:
+            raise ValueError("Agent must be configured with at least one planning tool.")
+        self.active_tools_schemas = self._build_tool_schemas(self.allowed_tools)
+        self._tool_stub_class_name = _TOOL_STUB_CLASS_NAME
+        self._tool_stub_source = self._build_tool_stub_source()
 
         self.enable_run_logging = enable_run_logging
         self._run_log_context: Optional[RunLogContext] = None
@@ -149,8 +136,8 @@ class Agent(AgentInstrumentationMixin):
             print("System Prompt Template (spec omitted in logs):")
             print(self._system_prompt_template_preview)
             print(
-                f"Allowed syscalls ({len(self.allowed_syscalls)}): "
-                + ", ".join(self.allowed_syscalls)
+                f"Allowed tools ({len(self.allowed_tools)}): "
+                + ", ".join(self.allowed_tools)
             )
             print(f"Plan retries: {self.plan_max_retries}")
 
@@ -174,7 +161,7 @@ class Agent(AgentInstrumentationMixin):
             result = self._orchestrator.execute_with_retries(
                 plan_request,
                 capture_trace=self._capture_trace,
-                metadata={"allowed_syscalls": list(self.allowed_syscalls)},
+                metadata={"allowed_tools": list(self.allowed_tools)},
                 goal_summary=self.goal_manager.get_goals_for_prompt(),
             )
             final_message = self._finalize_plan_result(result)
@@ -199,76 +186,48 @@ class Agent(AgentInstrumentationMixin):
     def _build_default_runner_factory(self) -> PlanRunner:
         return PlanRunner()
 
-    def _discover_syscalls(self) -> List[str]:
-        registry = self._registry_factory()
-        names = sorted(registry.to_dict().keys())
+    def _discover_tool_names(
+        self,
+        tags: Optional[Sequence[str]],
+        match_all: bool,
+    ) -> List[str]:
+        requested_tags = [tag for tag in (tags or []) if tag and tag.strip()]
+        registry_entries = get_tools_by_tags(requested_tags, match_all=match_all)
+        names = sorted(registry_entries.keys())
+        if requested_tags and not names:
+            raise ValueError(
+                f"No planning tools matched tags {requested_tags} (match_all={match_all})."
+            )
         if not names:
-            raise RuntimeError("No syscalls registered in the provided registry factory.")
+            raise RuntimeError("No planning tools are registered. Import tool modules first.")
         return names
 
-    def _resolve_allowed_syscalls(
+    def _resolve_allowed_tools(
         self,
-        available: List[str],
+        discovered: Sequence[str],
         explicit: Optional[Sequence[str]],
-        tags: Optional[List[str]],
-        match_all: bool,
     ) -> List[str]:
         if explicit:
-            normalized = {name.strip(): None for name in explicit if name and name.strip()}
-            missing = [name for name in normalized if name not in available]
+            normalized = [name.strip() for name in explicit if name and name.strip()]
+            unique = sorted(set(normalized))
+            missing: List[str] = []
+            for name in unique:
+                schema = get_tool_schema(name)
+                if schema is None:
+                    module_name = get_module_for_tool_name(name)
+                    if module_name:
+                        load_tool_module(module_name, warn=self.verbose)
+                        schema = get_tool_schema(name)
+                if schema is None:
+                    missing.append(name)
             if missing:
-                raise ValueError(f"Unknown syscalls requested: {', '.join(missing)}")
-            return sorted(normalized)
+                raise ValueError(f"Unknown planning tools requested: {', '.join(missing)}")
+            return unique
+        return list(discovered)
 
-        if tags:
-            filtered = self._filter_syscalls_by_tags(available, tags, match_all)
-            if not filtered:
-                raise ValueError(
-                    f"No syscalls matched tags {tags} (match_all={match_all})."
-                )
-            return filtered
-
-        return list(available)
-
-    def _filter_syscalls_by_tags(
-        self,
-        available: Sequence[str],
-        tags: Sequence[str],
-        match_all: bool,
-    ) -> List[str]:
-        desired = {tag.strip().lower() for tag in tags if tag and tag.strip()}
-        if not desired:
-            return list(available)
-
-        matched: List[str] = []
-        for name in available:
-            tool_tags = self._tags_for_syscall(name)
-            if not tool_tags:
-                # Built-ins like log remain available regardless of tag filters.
-                matched.append(name)
-                continue
-            if match_all:
-                if desired.issubset(tool_tags):
-                    matched.append(name)
-            elif tool_tags.intersection(desired):
-                matched.append(name)
-        return matched
-
-    def _tags_for_syscall(self, syscall_name: str) -> Set[str]:
-        tool_name = _SYS_CALL_TOOL_MAP.get(syscall_name)
-        if tool_name is None:
-            return {"utility"}
-        tool_tags = get_tool_tags(tool_name) or []
-        return {tag.lower() for tag in tool_tags}
-
-    def _build_tool_schemas(self, syscalls: Sequence[str]) -> List[Dict[str, Any]]:
-        seen: Set[str] = set()
+    def _build_tool_schemas(self, tool_names: Sequence[str]) -> List[Dict[str, Any]]:
         schemas: List[Dict[str, Any]] = []
-        for syscall in syscalls:
-            tool_name = _SYS_CALL_TOOL_MAP.get(syscall)
-            if not tool_name or tool_name in seen:
-                continue
-            seen.add(tool_name)
+        for tool_name in tool_names:
             schema = get_tool_schema(tool_name)
             if schema is None:
                 module_name = get_module_for_tool_name(tool_name)
@@ -279,6 +238,27 @@ class Agent(AgentInstrumentationMixin):
                 schemas.append(schema)
         return schemas
 
+    def _build_tool_stub_source(self) -> Optional[str]:
+        tool_names: List[str] = []
+        for schema in self.active_tools_schemas:
+            if not isinstance(schema, dict):
+                continue
+            function_meta = schema.get("function")
+            if not isinstance(function_meta, dict):
+                continue
+            name = function_meta.get("name")
+            if name:
+                tool_names.append(str(name))
+        unique_names = sorted(set(tool_names))
+        if not unique_names:
+            return None
+        try:
+            return generate_tool_stub_class(self._tool_stub_class_name, unique_names)
+        except ToolStubGenerationError as exc:
+            if self.verbose:
+                print(f"Skipping tool stub generation: {exc}")
+            return None
+
     def _build_plan_request(self, user_input: str) -> JavaPlanRequest:
         goals = [goal.description for goal in self.goal_manager.goals]
         task = self._format_planner_task(user_input)
@@ -287,7 +267,10 @@ class Agent(AgentInstrumentationMixin):
             task=task,
             goals=goals,
             context=context,
-            allowed_syscalls=self.allowed_syscalls,
+            tool_names=self.allowed_tools,
+            tool_schemas=self.active_tools_schemas,
+            tool_stub_source=self._tool_stub_source,
+            tool_stub_class_name=self._tool_stub_class_name if self._tool_stub_source else None,
             metadata={
                 "goal_count": len(goals),
                 "source": "llmflow.core.agent",
@@ -298,7 +281,7 @@ class Agent(AgentInstrumentationMixin):
         header = (
             "Create a Java class named Planner that carries out the user's request. "
             "Keep the structure minimal, lean on helper methods for decomposition, and "
-            "use allowed syscalls only when a step can be executed directly."
+            "invoke planning tools via the provided stub class when a step can be executed directly."
         )
         normalized = user_input.strip()
         if not normalized:
