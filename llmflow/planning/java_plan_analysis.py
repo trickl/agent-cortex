@@ -15,6 +15,7 @@ class SyscallInvocation:
     args: List[str]
     line: Optional[int]
     column: Optional[int]
+    comment: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -22,6 +23,7 @@ class SyscallInvocation:
             "args": list(self.args),
             "line": self.line,
             "column": self.column,
+            "comment": self.comment,
         }
 
 
@@ -33,6 +35,7 @@ class HelperInvocation:
     args: List[str]
     line: Optional[int]
     column: Optional[int]
+    comment: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -40,6 +43,7 @@ class HelperInvocation:
             "args": list(self.args),
             "line": self.line,
             "column": self.column,
+            "comment": self.comment,
         }
 
 
@@ -140,9 +144,10 @@ def analyze_java_plan(source: str) -> JavaPlanGraph:
 
     tree = javalang.parse.parse(source)
     class_decl = _select_plan_class(tree.types)
+    source_lines = source.splitlines()
     functions: List[FunctionSummary] = []
     for method in class_decl.methods:
-        functions.append(_summarize_method(method))
+        functions.append(_summarize_method(method, source_lines))
     return JavaPlanGraph(class_name=class_decl.name, functions=functions)
 
 
@@ -156,7 +161,10 @@ def _select_plan_class(types: Sequence[Any]) -> javalang.tree.ClassDeclaration:
     return classes[0]
 
 
-def _summarize_method(method: javalang.tree.MethodDeclaration) -> FunctionSummary:
+def _summarize_method(
+    method: javalang.tree.MethodDeclaration,
+    source_lines: Sequence[str],
+) -> FunctionSummary:
     params = [param.name for param in method.parameters]
     summary = FunctionSummary(
         name=method.name,
@@ -169,13 +177,26 @@ def _summarize_method(method: javalang.tree.MethodDeclaration) -> FunctionSummar
     for _, node in method.filter(javalang.tree.MethodInvocation):
         args = [_render_expression(arg) for arg in (node.arguments or [])]
         line, column = _node_position(node)
+        comment = _extract_leading_comment(source_lines, line)
         if node.qualifier == "syscall":
             summary.syscalls.append(
-                SyscallInvocation(name=node.member, args=args, line=line, column=column)
+                SyscallInvocation(
+                    name=node.member,
+                    args=args,
+                    line=line,
+                    column=column,
+                    comment=comment,
+                )
             )
             continue
         summary.helper_calls.append(
-            HelperInvocation(name=node.member, args=args, line=line, column=column)
+            HelperInvocation(
+                name=node.member,
+                args=args,
+                line=line,
+                column=column,
+                comment=comment,
+            )
         )
 
     for _, node in method.filter(javalang.tree.LocalVariableDeclaration):
@@ -288,6 +309,40 @@ def _node_position(node: Any) -> Tuple[Optional[int], Optional[int]]:
     if not position:
         return None, None
     return position.line, position.column
+
+
+def _extract_leading_comment(
+    source_lines: Sequence[str],
+    line_number: Optional[int],
+) -> Optional[str]:
+    if line_number is None or line_number <= 1:
+        return None
+    idx = line_number - 2  # zero-based index of line before invocation
+    collected: List[str] = []
+    encountered_content = False
+    while idx >= 0:
+        raw_line = source_lines[idx]
+        stripped = raw_line.strip()
+        if not stripped:
+            if collected:
+                break
+            idx -= 1
+            continue
+        if stripped.startswith("//"):
+            collected.append(stripped.lstrip("/").strip())
+            idx -= 1
+            continue
+        if stripped.startswith("/*"):
+            comment_line = stripped.lstrip("/*").rstrip("*/").strip()
+            if comment_line:
+                collected.append(comment_line)
+            break
+        encountered_content = True
+        break
+    if not collected:
+        return None
+    collected.reverse()
+    return " ".join(part for part in collected if part)
 
 
 __all__ = [

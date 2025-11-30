@@ -61,3 +61,14 @@ def test_execute_reports_parse_error():
 
     assert result["success"] is False
     assert result["errors"][0]["type"] == "parse_error"
+
+
+def test_execute_reports_lexer_error_with_markdown_header():
+    runner = PlanRunner(specification="SPEC")
+    plan_source = """# Java Planning Specification\npublic class Plan {\n    public void main() {\n        syscall.log(\"noop\");\n    }\n}\n"""
+
+    result = runner.execute(plan_source)
+
+    assert result["success"] is False
+    assert result["errors"][0]["type"] == "parse_error"
+    assert "Java Planning Specification" in result["errors"][0]["message"]

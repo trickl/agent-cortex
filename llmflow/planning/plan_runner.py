@@ -1,8 +1,9 @@
 """Static analysis entry points for Java plan programs."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import javalang
 
@@ -34,7 +35,7 @@ class PlanRunner:
         metadata_payload = dict(metadata or {})
         try:
             graph = analyze_java_plan(plan_source)
-        except javalang.parser.JavaSyntaxError as exc:
+        except (javalang.parser.JavaSyntaxError, javalang.tokenizer.LexerError) as exc:
             error = _format_parse_error(exc)
             return {
                 "success": False,
@@ -92,17 +93,47 @@ class PlanRunner:
             ) from exc
 
 
-def _format_parse_error(error: javalang.parser.JavaSyntaxError) -> Dict[str, Any]:
+_LINE_PATTERN = re.compile(r"line\s+(?P<line>\d+)", re.IGNORECASE)
+_COLUMN_PATTERN = re.compile(r"column\s+(?P<column>\d+)", re.IGNORECASE)
+
+
+def _format_parse_error(error: Exception) -> Dict[str, Any]:
     line: Optional[int] = None
     column: Optional[int] = None
-    if getattr(error, "position", None):
-        line, column = error.position
+    position = getattr(error, "position", None)
+    if position:
+        line, column = position
+    inferred_line, inferred_column = _infer_position_from_message(str(error))
+    if line is None:
+        line = inferred_line
+    if column is None:
+        column = inferred_column
     return {
         "type": "parse_error",
         "message": str(error),
         "line": line,
         "column": column,
     }
+
+
+def _infer_position_from_message(message: str) -> Tuple[Optional[int], Optional[int]]:
+    if not message:
+        return None, None
+    line = None
+    column = None
+    line_match = _LINE_PATTERN.search(message)
+    if line_match:
+        try:
+            line = int(line_match.group("line"))
+        except ValueError:
+            line = None
+    column_match = _COLUMN_PATTERN.search(message)
+    if column_match:
+        try:
+            column = int(column_match.group("column"))
+        except ValueError:
+            column = None
+    return line, column
 
 
 __all__ = ["PlanRunner"]

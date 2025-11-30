@@ -27,29 +27,99 @@ _PLANNER_TOOL_NAME = "define_java_plan"
 logger = logging.getLogger(__name__)
 
 _CLASS_DECL_PATTERN = re.compile(r"^\s*(?:public\s+)?class\s+\w+", re.MULTILINE)
-_FENCE_BLOCK_PATTERN = re.compile(
-    r"^```[a-zA-Z0-9_-]*\s*\n(?P<body>[\s\S]*?)\n```$",
-    re.MULTILINE,
+_CODE_FENCE_PATTERN = re.compile(r"```(?P<lang>[^\n`]*)\n", re.MULTILINE)
+_MARKDOWN_PREFIX_PATTERN = re.compile(
+    r"^(?:#{1,6}\s+|>{1,}\s+|[-*+]\s+|\d+\.\s+|`{1,3}$)",
 )
-
-
-def _strip_markdown_fences(source: str) -> str:
-    """Remove a single leading/trailing markdown fence pair if present."""
-
-    text = source.strip()
-    match = _FENCE_BLOCK_PATTERN.match(text)
-    if match:
-        return match.group("body").strip()
-    return text
+_LIKELY_JAVA_PREFIX_PATTERN = re.compile(
+    r"^(?:package\s+|import\s+|(?:public|protected|private|abstract|final|static)\b|class\s+|interface\s+|enum\s+|record\s+|@|/\*|//|\*)",
+)
 
 
 def _normalize_java_source(source: str) -> str:
     """Normalize Java source and ensure it declares a top-level class."""
 
-    stripped = _strip_markdown_fences(source)
-    if not _CLASS_DECL_PATTERN.search(stripped):
+    stripped = source.strip()
+    candidate = _extract_java_candidate(stripped)
+    if not _CLASS_DECL_PATTERN.search(candidate):
         raise ValueError("Java payload must declare a top-level class.")
-    return stripped.strip()
+    return candidate.strip()
+
+
+def _extract_java_candidate(source: str) -> str:
+    block = _extract_code_block(source)
+    if block:
+        cleaned = _strip_trailing_backticks(block)
+        if cleaned:
+            return cleaned
+
+    trimmed = _trim_non_java_prefix(source)
+    trimmed = _strip_trailing_backticks(trimmed)
+    return trimmed or source
+
+
+def _extract_code_block(source: str) -> Optional[str]:
+    candidates: List[Dict[str, Any]] = []
+    for match in _CODE_FENCE_PATTERN.finditer(source):
+        lang = (match.group("lang") or "").strip().lower()
+        block_start = match.end()
+        block_end = source.find("```", block_start)
+        closed = True
+        if block_end == -1:
+            block_end = len(source)
+            closed = False
+        body = source[block_start:block_end].strip()
+        if not body:
+            continue
+        candidates.append(
+            {
+                "lang": lang,
+                "body": body,
+                "closed": closed,
+                "start": match.start(),
+            }
+        )
+
+    if not candidates:
+        return None
+
+    def _score(candidate: Dict[str, Any]) -> Tuple[int, int, int]:
+        lang_score = 1 if "java" in candidate["lang"] else 0
+        closed_score = 1 if candidate["closed"] else 0
+        return (lang_score, closed_score, candidate["start"])
+
+    best = max(candidates, key=_score)
+    return best["body"]
+
+
+def _trim_non_java_prefix(source: str) -> str:
+    lines = source.splitlines()
+    result: List[str] = []
+    dropping = True
+    for line in lines:
+        stripped = line.lstrip()
+        if dropping:
+            if not stripped:
+                continue
+            if stripped.startswith("```"):
+                continue
+            if _MARKDOWN_PREFIX_PATTERN.match(stripped):
+                continue
+            if _LIKELY_JAVA_PREFIX_PATTERN.match(stripped):
+                dropping = False
+                result.append(line)
+                continue
+            # Skip any other non-Java preamble lines.
+            continue
+        result.append(line)
+    return "\n".join(result).lstrip()
+
+
+def _strip_trailing_backticks(source: str) -> str:
+    lines = source.splitlines()
+    while lines and lines[-1].strip() in {"```", "``", "`"}:
+        lines.pop()
+    return "\n".join(lines).rstrip()
 
 
 def _extract_tool_call_count(exc: Exception) -> Optional[int]:
