@@ -17,6 +17,7 @@ from llmflow.runtime.syscall_registry import SyscallRegistry
 
 from .execution_artifacts import PlanExecutionArtifacts
 from .java_plan_analysis import analyze_java_plan
+from .plan_runner import detect_stub_method_errors
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 JANINO_JAR = PROJECT_ROOT / "third_party" / "janino" / "janino-3.1.11.jar"
@@ -280,6 +281,21 @@ class JaninoPlanRunner:
             raise JaninoWorkerError("Plan artifacts were not provided to the Janino runtime.")
         graph = analyze_java_plan(plan_source, tool_stub_class_name=tool_stub_class_name)
         metadata_payload = dict(metadata or {})
+        stub_errors = detect_stub_method_errors(graph)
+        if stub_errors:
+            metadata_payload.setdefault("functions", len(graph.functions))
+            metadata_payload.setdefault("function_names", [fn.name for fn in graph.functions])
+            metadata_payload.setdefault(
+                "tool_call_count",
+                sum(len(fn.tool_calls) for fn in graph.functions),
+            )
+            return {
+                "success": False,
+                "errors": stub_errors,
+                "graph": graph.to_dict(),
+                "metadata": metadata_payload,
+                "trace": [],
+            }
         metadata_payload.setdefault("functions", len(graph.functions))
         metadata_payload.setdefault("function_names", [fn.name for fn in graph.functions])
         metadata_payload.setdefault(

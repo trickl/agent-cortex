@@ -111,6 +111,8 @@ class FunctionSummary:
     assignments: List[StateAssignment] = field(default_factory=list)
     branches: List[BranchSummary] = field(default_factory=list)
     exception_handlers: List[ExceptionHandlerSummary] = field(default_factory=list)
+    is_stub: bool = False
+    stub_comment: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -122,6 +124,8 @@ class FunctionSummary:
             "assignments": [assignment.to_dict() for assignment in self.assignments],
             "branches": [branch.to_dict() for branch in self.branches],
             "exception_handlers": [handler.to_dict() for handler in self.exception_handlers],
+            "is_stub": self.is_stub,
+            "stub_comment": self.stub_comment,
         }
 
 
@@ -179,6 +183,8 @@ def _summarize_method(
         return_type=_type_name(method.return_type),
     )
     if method.body is None:
+        summary.is_stub = method.name != "main"
+        summary.stub_comment = None
         return summary
 
     normalized_qualifiers = {qualifier.split(".")[-1] for qualifier in tool_qualifiers}
@@ -264,7 +270,30 @@ def _summarize_method(
                 )
             )
 
+    summary.is_stub = summary.name != "main" and not summary.tool_calls and not summary.helper_calls
+    if summary.is_stub:
+        first_statement_line = _find_first_statement_line(method)
+        if first_statement_line is not None:
+            summary.stub_comment = _extract_leading_comment(source_lines, first_statement_line)
+        else:
+            summary.stub_comment = None
+
     return summary
+
+
+def _find_first_statement_line(method: javalang.tree.MethodDeclaration) -> Optional[int]:
+    if not method.body:
+        return None
+    queue: List[Any] = list(method.body)
+    while queue:
+        node = queue.pop(0)
+        line, _ = _node_position(node)
+        if line is not None:
+            return line
+        nested = getattr(node, "statements", None)
+        if nested:
+            queue[:0] = list(nested)
+    return None
 
 
 def _render_expression(node: Optional[Any]) -> str:

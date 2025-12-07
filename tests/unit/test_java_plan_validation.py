@@ -37,4 +37,26 @@ def test_plan_runner_reports_validation_errors():
     result = runner.execute(source)
 
     assert result["success"] is False
-    assert result["errors"][0]["type"] == "validation_error"
+    error_types = {error["type"] for error in result["errors"]}
+    assert "validation_error" in error_types
+
+
+def test_plan_runner_flags_stub_helpers():
+    runner = PlanRunner(specification="SPEC")
+    source = """
+    public class Plan {
+        public void main() {
+            // orchestration entrypoint
+        }
+
+        private boolean hasOpenIssues() {
+            // Stub: Check if there are any open issues in Qlty.
+            return false;
+        }
+    }
+    """
+
+    result = runner.execute(source)
+
+    assert result["success"] is False
+    assert any(error["type"] == "stub_method" for error in result["errors"])

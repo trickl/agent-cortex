@@ -92,7 +92,30 @@ class PlanRunner:
                     "function": None,
                 }
             )
+        errors.extend(detect_stub_method_errors(graph))
         return errors
+
+
+def detect_stub_method_errors(graph: JavaPlanGraph) -> List[Dict[str, Any]]:
+    """Return diagnostics for helper methods that remain undecomposed stubs."""
+
+    errors: List[Dict[str, Any]] = []
+    for function in graph.functions:
+        if function.name == "main":
+            continue
+        if function.tool_calls or function.helper_calls:
+            continue
+        message = f"Helper '{function.name}' is a placeholder with no tool or helper calls."
+        if function.stub_comment:
+            message += f" Comment: {function.stub_comment}."
+        errors.append(
+            {
+                "type": "stub_method",
+                "message": message,
+                "function": function.name,
+            }
+        )
+    return errors
 
     @staticmethod
     def _load_specification() -> str:
@@ -143,4 +166,4 @@ def _infer_position_from_message(message: str) -> Tuple[Optional[int], Optional[
     return line, column
 
 
-__all__ = ["PlanRunner"]
+__all__ = ["PlanRunner", "detect_stub_method_errors"]

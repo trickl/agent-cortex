@@ -1,395 +1,184 @@
-# AgentCortex
-### *An open, modular, extensible kernel for tool-using AI agents*
+# **Agent-Cortex**  
+*A Decomposition-Driven, Self-Refining Orchestration Engine for Large Language Models*
 
-> **AgentCortex** is an open-source evolution of the excellent  
-> **[LLMFlow](https://github.com/kamikaze2020/llmflow)** project.  
-> Built on its foundations, this fork expands the original design into a  
-> **general-purpose kernel** for planning, reasoning, and connecting large language models  
-> to modular tools, agents, and workflows.
+Agent-Cortex is an experiment in building *reliable intelligence atop unreliable substrates*.  
+At its heart lies a simple question:
+
+> **Can we turn the inherently fuzzy output of LLMs into a system that behaves with the precision of classical software?**
+
+The project explores this question by constructing a hierarchical, self-correcting planning system in which LLMs write *typed, executable plans*; a refinement engine ensures those plans compile; and a Python-based runtime executes them step-by-step, deferring to tools or generating new sub-plans as required.
+
+This is not merely another agent framework. Agent-Cortex is an attempt at a **principled architecture** — one inspired as much by *compiler theory* and *soft robotics* as by contemporary AI.
 
 ---
 
-## 🙏 Credits
+## **Why Agent-Cortex Exists**
+
+Contemporary LLM agents often suffer from the same ailments:
+
+- Tool invocation is inconsistent and brittle.  
+- Plans are ephemeral, untyped, and difficult to validate.  
+- Context rapidly degrades.  
+- Minor deviations (indentation, hallucinated fields, inconsistent schema) cause catastrophic failure.  
+- The agent behaves as though improvising rather than reasoning.
+
+Agent-Cortex attempts to remedy these structural issues by imposing discipline and *form*.  
+Its design philosophy rests on four key insights:
+
+### **1. Decomposition is the only scalable form of reasoning**
+LLMs perform best when asked to break a problem into steps.  
+Agent-Cortex leverages this by allowing the model to **invent arbitrary functions** (sub-goals) inside a pure Java plan.  
+Each function must reduce complexity relative to its parent.  
+Eventually, the leaves of the tree must resolve into concrete tool invocations.
+This approach purposely avoids the traditional agent loop employed by chat agents that add each new question
+and response to the context window of the LLM. The chat agent loop suffers over time from increased cost, lower speed
+and hallucinations as the context window grows. It is forced eventually to summarise prior conversational history
+as a compromise, in the process losing essential information.
+The hierarchical approach instead works in the same way as traditional programming - each sub-problem only
+as a context-window to solve it's immediate concern. This is faster, cheaper and removes the context
+pollution issue.
+
+### **2. Typed languages are a blessing, not a burden**
+Rather than invent a bespoke DSL in planning actions (and wrestle with schema complexity), we let the model write **real Java**.  
+Java’s type system offers a natural scaffolding in which the plan is:
+
+- structured  
+- hierarchical  
+- machine-verifiable  
+
+LLMs are trained on a wealth of Java already, being one of the most popular typed languages in the world, so we don't have
+to fill our system context with instructions on how to write it.
+
+If the model produces poor Java — no matter: a refinement loop will fix it.
+
+### **3. Refinement is not optional — it *is* the method**
+The first plan an LLM produces will usually be wrong.  
+The second will be better.  
+By the tenth, you often have something correct.
+
+Agent-Cortex embraces this reality by implementing a **tight refinement loop**:
+
+1. The model produces Java during it's planning phase to decompose the task at hand.  
+2. We compile it.  
+3. On error, the model receives the original code, the compiler logs, and is instructed to make *minimal, localised patches*.  
+4. We repeat until the code compiles (or we abandon the attempt).
+
+This is the same loop later used for tool-level code repair.
+
+### **4. Tools are terminal nodes of reasoning**
+We remove the notion of “normal” vs “deferred”.  
+All invented functions are *implicitly deferred* unless they call a tool.  
+A tool call is a leaf node, and therefore a base case of reasoning.  
+
+If a function can be solved by a tool, it *must* be solved by a tool.
+
+---
+
+## **System Architecture**
+
+Agent-Cortex consists of three interacting layers:
+
+---
+
+### **1. The Planner (LLM-Driven, Java-Based)**
+
+- Accepts a natural language request.
+- Produces a **hierarchical Java file** in which:
+  - Functions represent sub-goals.
+  - Leaf functions call concrete tools.
+- Adheres to four structural rules:
+  1. The model may invent functions freely.  
+  2. Sub-functions must reduce complexity.  
+  3. Tool-solvable steps must call tools directly.  
+  4. Excessive depth (e.g., >7 levels) invalidates the plan.  
+
+The result is a static but deeply structured representation of intent.
+
+---
+
+### **2. The Refinement Engine (Java Compiler + Patch Loop)**
+
+- Compiles the generated Java.  
+- On failure:
+  - Sends the model the code + compiler output.  
+  - Requests a **surgical patch**, not a complete rewrite.  
+- Repeats until:
+  - The code compiles,  
+  - or a retry threshold is met.
+
+This mechanism dramatically improves reliability over naïve code generation.
+
+---
+
+### **3. The Executor (Python Runtime + Tooling Layer)**
+
+Although the plan itself is expressed in Java, the execution engine is Python-based — pragmatic, lightweight, and easily containerised.
+
+Execution proceeds as follows:
+
+1. The plan’s call graph is traversed.  
+2. When reaching a stub method, the system:
+   - Constructs a new planning request for that sub-goal.  
+   - Generates and refines a sub-plan.  
+   - Returns the output upwards.  
+3. A call to `PlanningTools.someTool()` maps to **real registered tools** in Python.  
+4. The executor integrates results, folding them back through the hierarchy.
+
+This Python/Java duality proves surprisingly elegant:  
+Java provides structure; Python provides operational flexibility.
+
+---
+
+## **Key Design Ambitions**
+
+Agent-Cortex aspires to become a **general-purpose orchestration layer** offering:
+
+- **Repeatability** — Plans are deterministic artefacts, cacheable and testable.  
+- **Traceability** — Every decision is stored as code.  
+- **Composability** — Tools and sub-plans form a natural architecture.  
+- **Robustness** — Refinement and decomposition counteract LLM noisiness.  
+- **Extensibility** — Any callable tool (weather APIs, email handlers, CUDA debuggers) can join the ecosystem.
+
+---
+
+## **A Note on the Philosophy**
+
+Agent-Cortex is, in spirit, closer to *compilers* and *hierarchical planners* than to typical LLM “agents”.
+
+We do not chase emergent magic.  
+We build robustness through structure.
+
+The system assumes:
+
+- LLMs will hallucinate.  
+- They will be inconsistent.  
+- They will occasionally produce things of unalloyed absurdity.
+
+And yet: with the right scaffolding, they can behave like extraordinarily capable junior engineers — messy, but improvable.
+
+Agent-Cortex is that scaffolding.
+
+---
+
+## **Roadmap**
+
+- Working examples of building useful agents using just natural language
+- Better observability and logging
+- Better robustness / reliability
+- Separation of tooling into a separate repository 
+- Dynamic tool search and lading
+
+---
+
+## **Contributing**
+
+PRs are warmly welcomed.  
+This project grew out of curiosity, and will grow further through conversation, critique, and playful experimentation.
+
+If Agent-Cortex intrigues you — build with it, break it, refine it, extend it.
+
+---
+
+## **Credits**
 
 This project began as a fork of **LLMFlow** by **kamikaze2020**, whose work provided the core inspiration for a lightweight, structured orchestration layer around LLMs.
-
-We are deeply grateful for the original design, architecture, and ideas contributed by that project. AgentCortex would not exist without it.
-
----
-
-# 🚀 What is AgentCortex?
-
-**AgentCortex** is the open-source kernel for building powerful, modular, self-improving AI agents that can:
-
-- Think using reasoning LLMs  
-- Load tools dynamically  
-- Plan multi-step workflows  
-- Operate on real codebases  
-- Integrate into CI/CD pipelines  
-- Improve themselves over time  
-- Remain simple, inspectable, and extensible  
-
-It is **not** a monolithic framework.  
-It is **not** a heavy dependency tree.  
-And it is **not** an attempt at AGI.
-
-Instead, it is a *clean, minimal runtime* for structured agent behaviour — with tools and agents pluggable by design.
-
----
-
-# 🧠 The Vision
-
-Modern agentic systems (e.g., Copilot Workspace, Cody, Cursor) demonstrate remarkable capabilities —  
-but they are:
-
-- closed-source  
-- proprietary  
-- tightly coupled  
-- non-extensible  
-
-Developer communities cannot study them, extend them, or build their own equivalents.
-
-**AgentCortex aims to change that.**
-
-The ambition of this project is to create:
-
-> **A completely open, modular, transparent agentic kernel  
-> that the community can extend, improve, and evolve.**
-
-AgentCortex provides the **core reasoning loop**.  
-The community provides the **tools and agents**.  
-Together, we get a flexible, composable ecosystem.
-
----
-
-# 🧩 Key Ideas
-
-### **1. The Cortex = Kernel**
-
-The Cortex is intentionally small and stable.  
-It handles:
-
-- planning  
-- reasoning  
-- tool discovery  
-- tool loading  
-- tool execution  
-- agent orchestration  
-
-It does *not* include domain-specific tools.
-
----
-
-### **2. Tools = Modular Plugins**
-
-Tools live in **separate repositories** and can be:
-
-- Python modules  
-- Docker images  
-- REST endpoints  
-- CLI utilities  
-- Dynamically loaded code  
-
-Each tool advertises:
-
-- name  
-- capabilities  
-- entrypoint  
-- version  
-- metadata  
-
-Cortex can load tools from:
-
-- local directories  
-- Git repositories  
-- PyPI / Private indexes  
-- Artifactory  
-- URLs  
-- dynamic registration (ephemeral tools)
-
----
-
-### **3. Agents = Plans + Tools**
-
-Agents are declarative behaviours such as:
-
-- “Check code quality”  
-- “Fix code smells”  
-- “Refactor functions”  
-- “Improve documentation”  
-- “Design new features”  
-
-An agent produces a *plan*.  
-The Cortex executes that plan via available tools.
-
----
-
-### **4. Self-Improvement Loop**
-
-Because tools and agents are modular:
-
-- Agents can improve the Cortex repo itself  
-- Agents can improve the tools repo  
-- Agents can propose or generate new tools  
-- Agents can generate new agents  
-- The ecosystem becomes reflexive and self-maintaining  
-
-This is **bounded**, **safe**, and entirely reviewable — but very powerful.
-
----
-
-# 🏗️ Project Status
-
-AgentCortex is in early development, but actively evolving.
-
-### **Phase 1 (In progress):**
-- Functional end-to-end prototype  
-- Embedded tools inside Cortex for bootstrapping  
-- Jenkins-triggered workflow  
-- Example use case: fix “code smells” using QLTY REST API  
-
-### **Phase 2 (Coming next):**
-- Extract tools into separate repositories  
-- Define plugin contract  
-- Implement dynamic loaders (Python, Docker, REST, CLI)  
-- Harden the kernel  
-
-### **Phase 3:**
-- Documentation, examples, diagrams  
-- Developer guides (“How to write a tool/agent”)  
-- Branding, naming confirmation  
-
-### **Phase 4:**
-- Additional use cases  
-- Community-built tools  
-- Meta-agents  
-- Self-improving workflows  
-
----
-
-# 📦 Quick Start (early prototype)
-
-```bash
-git clone https://github.com/<yourname>/agentcortex
-cd agentcortex
-pip install -r requirements.txt
-
-# Example run (placeholder)
-python main.py --event post_commit --repo https://github.com/your/repo
-```
-
-## 🛠 Java Plan Executor
-
-You can execute the new Java-based plans programmatically without touching the
-lower-level parser/interpreter APIs. The `PlanExecutor` handles parsing,
-validation, execution, and tracing in one shot:
-
-```python
-from llmflow.planning.executor import PlanExecutor
-from llmflow.runtime.syscalls import build_default_syscall_registry
-
-registry = build_default_syscall_registry()
-executor = PlanExecutor(registry)
-
-plan = """
-public class Plan {
-	public void main() {
-		syscall.log("Hello, Cortex!");
-		return;
-	}
-}
-"""
-
-result = executor.execute_from_string(plan, capture_trace=True)
-
-if result["success"]:
-	print("Plan succeeded", result["trace"])
-else:
-	print("Plan failed", result["errors"])
-```
-
-`result` is always a dict that contains a `success` flag, the interpreter
-`return_value`, structured `errors`, optional `trace` events, and any metadata
-you pass in.
-
-## 🔌 Syscall Modules
-
-The runtime ships with a batteries-included syscall registry so Java plans can
-invoke real git, filesystem, and Qlty tools without extra plumbing. Use
-`llmflow.runtime.syscalls.register_default_syscalls` (or the convenience
-constructor `llmflow.runtime.syscalls.build_default_syscall_registry`) to
-populate a `SyscallRegistry` before handing it to the interpreter or
-`PlanExecutor`:
-
-```python
-from llmflow.planning.executor import PlanExecutor
-from llmflow.runtime.syscalls import build_default_syscall_registry
-
-registry = build_default_syscall_registry()
-executor = PlanExecutor(registry)
-
-# Optional: override the logger or swap in custom tool modules.
-# register_default_syscalls(registry, logger=my_logger)
-```
-
-The default modules expose the following syscall names to plans:
-
-- Utility: `log`
-- Git: `cloneRepo`, `createBranch`, `suggestBranchName`, `switchBranch`,
-  `stagePaths`, `commitChanges`, `getUncommittedChanges`, `pushBranch`,
-  `createPullRequest`
-- Files: `listFilesInTree`, `readTextFile`, `overwriteTextFile`, `applyTextRewrite`
-- Qlty: `qltyListIssues`, `qltyGetFirstIssue`
-
-Each syscall raises `ToolError` (catchable via `try`/`catch` blocks) when the
-underlying tool reports a failure, so plans can rely on consistent error
-handling.
-
-## 🧠 Java Plan Synthesizer
-
-Priority 5 introduces a dedicated planner hook so agents can request structured
-Java programs before execution. The `JavaPlanner` class automatically loads the
-planning specification, injects the allowed syscall list, and returns the raw
-Java source together with request metadata.
-
-```python
-from llmflow.llm_client import LLMClient
-from llmflow.planning import JavaPlanRequest, JavaPlanner
-
-llm = LLMClient()
-planner = JavaPlanner(llm)
-
-# Adjust structured retries (defaults to provider setting or 2 attempts) by
-# exporting the environment variable below or passing structured_max_retries.
-# export LLMFLOW_PLANNER_STRUCTURED_MAX_RETRIES=2
-
-plan = planner.generate_plan(
-	JavaPlanRequest(
-		task="Triage the failing lint issue",
-		goals=["Fetch the issue details", "Reproduce and patch the failure"],
-		allowed_syscalls=["log", "qltyListIssues", "readTextFile"],
-	)
-)
-
-print(plan.plan_source)
-```
-
-Later steps feed this plan into the Java runtime so the agent can execute the
-synthesized workflow end-to-end.
-
-> ℹ️ **Planner retries** – Structured plan generation honors
-> `LLMFLOW_PLANNER_STRUCTURED_MAX_RETRIES` when set. Otherwise it defers to the
-> provider's retry budget (falling back to two attempts when unspecified). Set
-> the variable to `0` to disable retries entirely or to any positive integer to
-> control how many Instructor attempts run before the plan is surfaced.
-
-### 🔁 Java Plan Retry & Telemetry
-
-Use `PlanOrchestrator` when you want the full generate → execute → repair loop
-with structured reporting. The orchestrator automatically:
-
-- compiles each synthesized plan with `javac` and feeds compiler diagnostics
-	back into the planner for up to three refinement rounds,
-- retries failed plans (validation or runtime) with bounded repair hints,
-- captures per-attempt traces/tool usage, and
-- returns a concise human-readable summary you can drop into agent memory.
-
-```python
-from llmflow.planning import JavaPlanRequest, JavaPlanner, PlanOrchestrator
-from llmflow.planning.plan_runner import PlanRunner
-
-planner = JavaPlanner(llm_client)
-orchestrator = PlanOrchestrator(
-	planner,
-	runner_factory=lambda: PlanRunner(),
-	max_retries=2,
-	max_compile_refinements=3,
-)
-
-result = orchestrator.execute_with_retries(
-	JavaPlanRequest(
-		task="Repair the failing lint issue",
-		goals=["Reproduce", "Patch", "Verify"],
-		allowed_syscalls=["log", "qltyListIssues"],
-	),
-	capture_trace=True,
-)
-
-print(result["summary"])          # e.g., "✅ Java plan run – 2 attempt(s) …"
-print(result["telemetry"])        # structured data for logs or analytics
-
-# When testing you can inject a fake compiler to avoid shelling out to javac.
-# In production ensure a JDK is installed so the sanitizer can run.
-```
-
-When integrating with the agent loop, write `result["summary"]` back to the
-conversation and stash `result["telemetry"]` for diagnostics so controllers and
-users can understand exactly what each plan attempted.
-
-## 🧭 Java Plan Agent Workflow
-
-The top-level `Agent` now relies exclusively on the Java planner/orchestrator
-stack. Legacy iterative loops have been removed in favour of a deterministic
-pipeline:
-
-1. Build a `JavaPlanRequest` from the incoming task, goal memory, and the
-   filtered syscall registry (tool access is controlled via tags).
-2. Ask `JavaPlanner` to generate the program and schedule it through
-   `PlanOrchestrator`, which handles retries and repair prompts.
-3. Stream summaries, telemetry, and tool traces back into the agent memory so
-   subsequent turns can reason about successes or blockers.
-
-Agents expose a `plan_max_retries` parameter (CLI/config key
-`plan_max_retries`) that caps orchestrator attempts per user turn. It now
-defaults to `0`, leaving retry logic to Instructor's structured parsing loop.
-Only raise it when you explicitly want the orchestrator to request entirely new
-plans after Instructor has already exhausted its own retries. The orchestrator also accepts
-`max_compile_refinements` (default `3`) to control how many times compiler
-errors are fed back to the planner before giving up. Because the legacy
-`agent_execution` and
-`agent_prompting` modules now raise `RuntimeError` on import, ensure any custom
-agents instantiate `llmflow.core.agent.Agent` directly and configure tool tags
-via `available_tool_tags`/`match_all_tags`.
-
-## 🤝 Contributing
-
-We welcome contributions of all kinds:
-
-- New tools  
-- New agents  
-- Documentation improvements  
-- Bug fixes  
-- Architecture feedback  
-- Loader implementations  
-- New use-case demos  
-- Community discussions  
-
-A full `CONTRIBUTING.md` will be added once the kernel is stable.
-
----
-
-## 📜 License
-
-**MIT License**
-
-This project is fully open under the MIT license, encouraging broad community contribution and both commercial and non-commercial use.
-
----
-
-## 🌍 Why This Matters
-
-Developers everywhere are experimenting with agentic workflows —  
-but they lack a clean, open, modular foundation to build upon.
-
-**AgentCortex** aims to be that foundation:
-
-- Transparent  
-- Hackable  
-- Extensible  
-- Community-first  
-- Pragmatic  
-- Practical  
-
-By providing an open kernel for tool-using agents, AgentCortex makes it possible for developers, teams, and communities to build, examine, extend, and improve agentic systems together.
-
-If the project resonates, the community will shape it into something far greater — an ecosystem of shared agents, tools, and ideas built on an open and evolving foundation.
