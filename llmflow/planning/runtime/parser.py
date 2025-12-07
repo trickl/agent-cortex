@@ -42,18 +42,27 @@ def _block_statements(block) -> List[Any]:
     return []
 
 
-def parse_java_plan(source: str) -> Plan:
+def parse_java_plan(source: str, *, tool_stub_class_name: Optional[str] = None) -> Plan:
     try:
         tree = javalang.parse.parse(source)
     except (javalang.parser.JavaSyntaxError, TypeError) as exc:
         raise PlanParseError(str(exc)) from exc
 
     class_decl = _extract_plan_class(tree.types)
+    stub_identifier = _normalize_stub_identifier(tool_stub_class_name)
     functions: List[FunctionDef] = []
     for method in class_decl.methods:
-        functions.append(_convert_method(method))
+        functions.append(_convert_method(method, tool_stub_identifier=stub_identifier))
     fn_map = {fn.name: fn for fn in functions}
     return Plan(functions=fn_map, ordered_functions=functions, line=class_decl.position.line if class_decl.position else None)
+
+
+def _normalize_stub_identifier(name: Optional[str]) -> Optional[str]:
+    if not name:
+        return None
+    if "." in name:
+        return name.rsplit(".", 1)[-1]
+    return name
 
 
 def _extract_plan_class(types: Iterable[Any]):
@@ -66,12 +75,16 @@ def _extract_plan_class(types: Iterable[Any]):
     return classes[0]
 
 
-def _convert_method(method: javalang.tree.MethodDeclaration) -> FunctionDef:
+def _convert_method(
+    method: javalang.tree.MethodDeclaration,
+    *,
+    tool_stub_identifier: Optional[str],
+) -> FunctionDef:
     params = [_convert_param(param) for param in method.parameters]
     return_type = _type_to_name(method.return_type)
     body: Optional[List[Stmt]] = None
     if method.body is not None:
-        body = _convert_block(method.body)
+        body = _convert_block(method.body, tool_stub_identifier=tool_stub_identifier)
     line, column = _node_position(method)
     return FunctionDef(
         name=method.name,
@@ -88,13 +101,13 @@ def _convert_param(param: javalang.tree.FormalParameter) -> Param:
     return Param(name=param.name, type=_type_to_name(param.type), line=line, column=column)
 
 
-def _convert_block(statements: List[Any]) -> List[Stmt]:
+def _convert_block(statements: List[Any], *, tool_stub_identifier: Optional[str]) -> List[Stmt]:
     result: List[Stmt] = []
     for entry in statements:
         node = getattr(entry, "statement", entry)
         if node is None:
             continue
-        converted = _convert_statement(node)
+        converted = _convert_statement(node, tool_stub_identifier=tool_stub_identifier)
         if not converted:
             continue
         if isinstance(converted, list):
@@ -104,17 +117,17 @@ def _convert_block(statements: List[Any]) -> List[Stmt]:
     return result
 
 
-def _convert_statement(node: Any) -> Optional[Stmt | List[Stmt]]:
+def _convert_statement(node: Any, *, tool_stub_identifier: Optional[str]) -> Optional[Stmt | List[Stmt]]:
     if isinstance(node, javalang.tree.BlockStatement):
         inner = getattr(node, "statement", None)
-        return _convert_statement(inner)
+        return _convert_statement(inner, tool_stub_identifier=tool_stub_identifier)
 
     if isinstance(node, javalang.tree.LocalVariableDeclaration):
         decls: List[Stmt] = []
         for declarator in node.declarators:
             if declarator.initializer is None:
                 raise PlanParseError("Variable declarations must include an initializer")
-            expr = _convert_expression(declarator.initializer)
+            expr = _convert_expression(declarator.initializer, tool_stub_identifier=tool_stub_identifier)
             line, column = _node_position(node)
             decls.append(
                 VarDecl(
@@ -128,25 +141,25 @@ def _convert_statement(node: Any) -> Optional[Stmt | List[Stmt]]:
         return decls
 
     if isinstance(node, javalang.tree.StatementExpression):
-        return _convert_statement(node.expression)
+        return _convert_statement(node.expression, tool_stub_identifier=tool_stub_identifier)
 
     if isinstance(node, javalang.tree.Assignment):
         if not isinstance(node.expressionl, javalang.tree.MemberReference):
             raise PlanParseError("Assignments must target identifiers")
         target = node.expressionl.member
-        expr = _convert_expression(node.value)
+        expr = _convert_expression(node.value, tool_stub_identifier=tool_stub_identifier)
         line, column = _node_position(node)
         return Assign(name=target, expr=expr, line=line, column=column)
 
     if isinstance(node, javalang.tree.MethodInvocation):
-        expr = _convert_method_invocation(node)
+        expr = _convert_method_invocation(node, tool_stub_identifier=tool_stub_identifier)
         line, column = _node_position(node)
         return ExprStmt(expr=expr, line=line, column=column)
 
     if isinstance(node, javalang.tree.IfStatement):
-        cond = _convert_expression(node.condition)
-        then_body = _convert_embedded_block(node.then_statement)
-        else_body = _convert_embedded_block(node.else_statement)
+        cond = _convert_expression(node.condition, tool_stub_identifier=tool_stub_identifier)
+        then_body = _convert_embedded_block(node.then_statement, tool_stub_identifier=tool_stub_identifier)
+        else_body = _convert_embedded_block(node.else_statement, tool_stub_identifier=tool_stub_identifier)
         line, column = _node_position(node)
         return IfStmt(cond=cond, then_body=then_body, else_body=else_body, line=line, column=column)
 
@@ -161,8 +174,8 @@ def _convert_statement(node: Any) -> Optional[Stmt | List[Stmt]]:
             var_name = getattr(first_decl, "name", None)
         if var_name is None:
             raise PlanParseError("Enhanced for loop must declare an iteration variable")
-        iterable = _convert_expression(control.iterable)
-        body = _convert_embedded_block(node.body)
+        iterable = _convert_expression(control.iterable, tool_stub_identifier=tool_stub_identifier)
+        body = _convert_embedded_block(node.body, tool_stub_identifier=tool_stub_identifier)
         line, column = _node_position(node)
         return ForStmt(var_name=var_name, iterable_expr=iterable, body=body, line=line, column=column)
 
@@ -171,8 +184,8 @@ def _convert_statement(node: Any) -> Optional[Stmt | List[Stmt]]:
             raise PlanParseError("try statement must include a catch block")
         catch = node.catches[0]
         error_var = catch.parameter.name
-        try_body = _convert_block(_block_statements(node.block))
-        catch_body = _convert_block(_block_statements(catch.block))
+        try_body = _convert_block(_block_statements(node.block), tool_stub_identifier=tool_stub_identifier)
+        catch_body = _convert_block(_block_statements(catch.block), tool_stub_identifier=tool_stub_identifier)
         line, column = _node_position(node)
         return TryCatchStmt(
             try_body=try_body,
@@ -183,19 +196,19 @@ def _convert_statement(node: Any) -> Optional[Stmt | List[Stmt]]:
         )
 
     if isinstance(node, javalang.tree.ReturnStatement):
-        expr = _convert_expression(node.expression) if node.expression is not None else None
+        expr = _convert_expression(node.expression, tool_stub_identifier=tool_stub_identifier) if node.expression is not None else None
         line, column = _node_position(node)
         return ReturnStmt(expr=expr, line=line, column=column)
 
     return None
 
 
-def _convert_embedded_block(statement: Any) -> List[Stmt]:
+def _convert_embedded_block(statement: Any, *, tool_stub_identifier: Optional[str]) -> List[Stmt]:
     if statement is None:
         return []
     if isinstance(statement, javalang.tree.BlockStatement):
-        return _convert_block(statement.statements or [])
-    converted = _convert_statement(statement)
+        return _convert_block(statement.statements or [], tool_stub_identifier=tool_stub_identifier)
+    converted = _convert_statement(statement, tool_stub_identifier=tool_stub_identifier)
     if converted is None:
         return []
     if isinstance(converted, list):
@@ -203,7 +216,7 @@ def _convert_embedded_block(statement: Any) -> List[Stmt]:
     return [converted]
 
 
-def _convert_expression(node: Any) -> Expr:
+def _convert_expression(node: Any, *, tool_stub_identifier: Optional[str]) -> Expr:
     if isinstance(node, javalang.tree.Literal):
         value = _literal_value(node.value)
         line, column = _node_position(node)
@@ -214,16 +227,16 @@ def _convert_expression(node: Any) -> Expr:
         return VarRef(name=node.member, line=line, column=column)
 
     if isinstance(node, javalang.tree.BinaryOperation):
-        left = _convert_expression(node.operandl)
-        right = _convert_expression(node.operandr)
+        left = _convert_expression(node.operandl, tool_stub_identifier=tool_stub_identifier)
+        right = _convert_expression(node.operandr, tool_stub_identifier=tool_stub_identifier)
         line, column = _node_position(node)
         return BinaryOp(op=node.operator, left=left, right=right, line=line, column=column)
 
     if isinstance(node, javalang.tree.MethodInvocation):
-        return _convert_method_invocation(node)
+        return _convert_method_invocation(node, tool_stub_identifier=tool_stub_identifier)
 
     if isinstance(node, javalang.tree.ArrayInitializer):
-        elements = [_convert_expression(expr) for expr in node.initializers]
+        elements = [_convert_expression(expr, tool_stub_identifier=tool_stub_identifier) for expr in node.initializers]
         line, column = _node_position(node)
         return ListLiteral(elements=elements, line=line, column=column)
 
@@ -234,18 +247,23 @@ def _convert_expression(node: Any) -> Expr:
                 key = getattr(pair, "name", None)
                 if key is None:
                     raise PlanParseError("Map literals must use named fields")
-                entries[key] = _convert_expression(pair.value)
+                entries[key] = _convert_expression(pair.value, tool_stub_identifier=tool_stub_identifier)
             line, column = _node_position(node)
             return MapLiteral(items=entries, line=line, column=column)
 
     raise PlanParseError(f"Unsupported expression: {type(node).__name__}")
 
 
-def _convert_method_invocation(node: javalang.tree.MethodInvocation) -> Expr:
+def _convert_method_invocation(
+    node: javalang.tree.MethodInvocation,
+    *,
+    tool_stub_identifier: Optional[str],
+) -> Expr:
     qualifier = node.qualifier
-    args = [_convert_expression(arg) for arg in node.arguments]
+    args = [_convert_expression(arg, tool_stub_identifier=tool_stub_identifier) for arg in node.arguments]
     line, column = _node_position(node)
-    if qualifier == "syscall":
+    normalized_stub = tool_stub_identifier.split(".")[-1] if tool_stub_identifier else None
+    if qualifier == "syscall" or (normalized_stub and qualifier == normalized_stub):
         return SyscallExpr(name=node.member, args=args, line=line, column=column)
     return CallExpr(name=node.member, args=args, line=line, column=column)
 

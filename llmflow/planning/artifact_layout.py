@@ -5,6 +5,8 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
+from .java_plan_compiler import JavaCompilationResult
+
 _PLAN_ID_SENTINEL = ".plan_id"
 
 
@@ -66,3 +68,26 @@ def format_artifact_attempt_label(
             raise ValueError("refinement_iteration must be >= 1 when provided")
         return f"{attempt_number}.{refinement_iteration}"
     return str(attempt_number)
+
+
+def persist_compile_artifacts(iteration_dir: Path, compile_result: JavaCompilationResult) -> None:
+    """Store success/error sentinels for a compile iteration."""
+
+    iteration_dir.mkdir(parents=True, exist_ok=True)
+    clean_path = iteration_dir / "clean"
+    errors_path = iteration_dir / "errors.log"
+    if compile_result.success:
+        clean_path.touch()
+        if errors_path.exists():
+            errors_path.unlink()
+        return
+    if clean_path.exists():
+        clean_path.unlink()
+    stderr = (compile_result.stderr or "").strip()
+    if not stderr:
+        messages = []
+        for error in compile_result.errors:
+            message = getattr(error, "message", None) or str(error)
+            messages.append(message)
+        stderr = "\n".join(messages)
+    errors_path.write_text(stderr or "Unknown compilation failure", encoding="utf-8")

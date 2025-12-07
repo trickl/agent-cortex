@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import List
 
 from llmflow.planning import (
@@ -8,7 +9,8 @@ from llmflow.planning import (
     JavaPlanner,
     PlanOrchestrator,
 )
-from llmflow.planning.plan_runner import PlanRunner
+from llmflow.planning.executor import PlanExecutor
+from llmflow.runtime.syscall_registry import SyscallRegistry
 _TOOL_STUB = """
 @SuppressWarnings("unused")
 public final class PlanningToolStubs {
@@ -38,7 +40,23 @@ class SequenceLLMClient:
 
 class AlwaysSuccessfulCompiler:
     def compile(self, plan_source: str, **kwargs) -> JavaCompilationResult:
+        work_dir = kwargs.get("working_dir")
+        if work_dir is not None:
+            work_path = Path(work_dir)
+            work_path.mkdir(parents=True, exist_ok=True)
+            (work_path / "Plan.class").write_bytes(b"")
         return JavaCompilationResult(success=True, command=("javac",), stdout="", stderr="")
+
+def _build_runner() -> PlanExecutor:
+    registry = SyscallRegistry()
+
+    def _log(message: str):
+        del message
+        return {"success": True}
+
+    registry.register("log", _log)
+    return PlanExecutor(registry)
+
 
 def test_java_retry_loop_end_to_end():
     first_plan_missing_main = {
@@ -66,11 +84,10 @@ def test_java_retry_loop_end_to_end():
     planner = JavaPlanner(llm, specification="SPEC", structured_enabled=True)
     orchestrator = PlanOrchestrator(
         planner,
-        runner_factory=lambda: PlanRunner(
-            specification="SPEC",
-        ),
+        runner_factory=_build_runner,
         max_retries=1,
         plan_compiler=AlwaysSuccessfulCompiler(),
+        enable_plan_cache=False,
     )
 
     request = JavaPlanRequest(

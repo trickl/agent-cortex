@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List
 
 import pytest
@@ -41,17 +42,25 @@ class DummyPlanner:
             prompt_hash=f"hash-{len(self.requests)}",
         )
 
+    def compute_prompt_hash(self, request: JavaPlanRequest) -> str:
+        del request  # unused preview for deterministic hash
+        return f"hash-{len(self.requests) + 1}"
+
 
 class DummyRunner:
     def __init__(self, outcomes: List[Dict[str, object]]):
         self._outcomes = list(outcomes)
         self.calls: List[Dict[str, object]] = []
+        self.bound_artifacts: List[object] = []
 
     def execute(self, plan_source: str, **kwargs) -> Dict[str, object]:
         if not self._outcomes:
             raise RuntimeError("No more outcomes queued")
         self.calls.append({"plan_source": plan_source, **kwargs})
         return self._outcomes.pop(0)
+
+    def bind_plan_artifacts(self, artifacts):
+        self.bound_artifacts.append(artifacts)
 
 
 @pytest.fixture
@@ -76,7 +85,15 @@ class DummyCompiler:
         if not self._results:
             raise RuntimeError("No more compilation results queued")
         self.calls.append({"plan_source": plan_source, **kwargs})
-        return self._results.pop(0)
+        result = self._results.pop(0)
+        working_dir = kwargs.get("working_dir")
+        if working_dir is not None:
+            work_path = Path(working_dir)
+            work_path.mkdir(parents=True, exist_ok=True)
+            if result.success:
+                marker = work_path / "Dummy.class"
+                marker.write_bytes(b"")
+        return result
 
 
 class DummyFixer:
@@ -148,6 +165,7 @@ def test_compile_failures_trigger_new_attempt_without_inline_replan(runner_facto
         plan_compiler=compiler,
         plan_fixer=fixer,
         plan_fixer_max_attempts=2,
+        enable_plan_cache=False,
     )
     request = JavaPlanRequest(task="Do thing", goals=["goal"])
 
@@ -173,7 +191,7 @@ def test_orchestrator_succeeds_without_retries(runner_factory):
         {"success": True, "errors": [], "metadata": {}},
     ])
     compiler = DummyCompiler([_compile_success()])
-    orchestrator = PlanOrchestrator(planner, make_runner, plan_compiler=compiler)
+    orchestrator = PlanOrchestrator(planner, make_runner, plan_compiler=compiler, enable_plan_cache=False)
     request = JavaPlanRequest(task="Do thing", goals=["goal"])
 
     result = orchestrator.execute_with_retries(request)
@@ -185,6 +203,10 @@ def test_orchestrator_succeeds_without_retries(runner_factory):
     assert "telemetry" in result
     assert "summary" in result
     assert "Attempt 1" in result["summary"]
+    assert runner.bound_artifacts, "Runner should capture plan artifacts"
+    artifact = runner.bound_artifacts[0]
+    assert artifact.plan_class_name == "Plan"
+    assert artifact.classes_dir.exists()
 
 
 def test_orchestrator_retries_and_returns_failure(runner_factory):
@@ -214,6 +236,7 @@ def test_orchestrator_retries_and_returns_failure(runner_factory):
         make_runner,
         max_retries=1,
         plan_compiler=compiler,
+        enable_plan_cache=False,
     )
     request = JavaPlanRequest(task="Do thing", goals=["goal"], additional_constraints=["Stay safe"])
 
@@ -250,7 +273,7 @@ def test_telemetry_includes_tool_usage(runner_factory):
         }
     ])
     compiler = DummyCompiler([_compile_success()])
-    orchestrator = PlanOrchestrator(planner, make_runner, plan_compiler=compiler)
+    orchestrator = PlanOrchestrator(planner, make_runner, plan_compiler=compiler, enable_plan_cache=False)
     request = JavaPlanRequest(task="Do thing", goals=["goal"])
 
     result = orchestrator.execute_with_retries(request)
@@ -291,6 +314,7 @@ def test_compile_failure_returns_failure_without_inline_replan(runner_factory):
         max_retries=0,
         max_compile_refinements=2,
         plan_compiler=compiler,
+        enable_plan_cache=False,
     )
     request = JavaPlanRequest(task="Fix it", goals=["goal"], tool_names=["log"], tool_stub_class_name="PlanningToolStubs")
 
@@ -333,6 +357,7 @@ def test_compile_failure_aborts_when_limit_reached(runner_factory):
         max_retries=0,
         max_compile_refinements=2,
         plan_compiler=compiler,
+        enable_plan_cache=False,
     )
     request = JavaPlanRequest(task="Fix", goals=["goal"], tool_names=["log"], tool_stub_class_name="PlanningToolStubs")
 
@@ -376,6 +401,7 @@ def test_plan_fixer_handles_compile_errors_without_replan(runner_factory):
         max_retries=0,
         plan_compiler=compiler,
         plan_fixer=fixer,
+        enable_plan_cache=False,
     )
     request = JavaPlanRequest(task="Fix", goals=["goal"], tool_stub_class_name="PlanningToolStubs")
 
@@ -437,6 +463,7 @@ def test_plan_fixer_stops_when_errors_increase(runner_factory):
         plan_compiler=compiler,
         plan_fixer=fixer,
         max_compile_refinements=3,
+        enable_plan_cache=False,
     )
     request = JavaPlanRequest(task="Fix", goals=["goal"], tool_stub_class_name="PlanningToolStubs")
 
@@ -467,6 +494,7 @@ def test_initial_plan_artifacts_written(tmp_path, runner_factory):
         make_runner,
         plan_compiler=compiler,
         plan_artifact_root=tmp_path / "artifacts",
+        enable_plan_cache=False,
     )
     request = JavaPlanRequest(
         task="Persist plan",
@@ -481,6 +509,83 @@ def test_initial_plan_artifacts_written(tmp_path, runner_factory):
     base_dir = tmp_path / "artifacts" / plan.prompt_hash / "1"
     plan_path = base_dir / "Plan.java"
     stub_path = base_dir / "PlanningToolStubs.java"
+    metadata_path = base_dir / "plan_metadata.json"
+    clean_path = base_dir / "clean"
+    classes_dir = base_dir / "classes"
     assert plan_path.exists()
     assert stub_path.exists()
     assert "PlanningToolStubs" in stub_path.read_text(encoding="utf-8")
+    assert metadata_path.exists()
+    assert clean_path.exists()
+    assert classes_dir.exists()
+    assert any(classes_dir.rglob("*.class"))
+
+
+def test_cached_plan_skips_planner(tmp_path, runner_factory):
+    planner = DummyPlanner([
+        """
+        public class Plan {
+            public void main() {
+                PlanningToolStubs.log("hello");
+            }
+        }
+        """,
+    ])
+    runner, make_runner = runner_factory([
+        {"success": True, "errors": [], "metadata": {}},
+    ])
+    compiler = DummyCompiler([_compile_success()])
+    artifact_root = tmp_path / "artifacts"
+    orchestrator = PlanOrchestrator(
+        planner,
+        make_runner,
+        plan_compiler=compiler,
+        plan_artifact_root=artifact_root,
+    )
+    request = JavaPlanRequest(
+        task="Cache plan",
+        goals=["goal"],
+        tool_stub_class_name="PlanningToolStubs",
+        tool_stub_source="public final class PlanningToolStubs { public static void log(String m) {} }",
+    )
+    result = orchestrator.execute_with_retries(request)
+    assert result["success"] is True
+
+    cached_hash = result["final_plan"].prompt_hash
+
+    class NeverPlanner:
+        def __init__(self, prompt_hash: str):
+            self.calls = 0
+            self._hash = prompt_hash
+
+        def generate_plan(self, request):  # noqa: ANN001 - test stub
+            self.calls += 1
+            raise AssertionError("Planner should not be invoked when cache exists")
+
+        def compute_prompt_hash(self, request):  # noqa: ANN001 - test stub
+            del request
+            return self._hash
+
+    cache_runner, make_cache_runner = runner_factory([
+        {"success": True, "errors": [], "metadata": {}},
+    ])
+    never_planner = NeverPlanner(cached_hash)
+    cache_compiler = DummyCompiler([_compile_success()])
+    orchestrator_cached = PlanOrchestrator(
+        never_planner,
+        make_cache_runner,
+        plan_compiler=cache_compiler,
+        plan_artifact_root=artifact_root,
+    )
+    cached_request = JavaPlanRequest(
+        task="Cache plan",
+        goals=["goal"],
+        tool_stub_class_name="PlanningToolStubs",
+        tool_stub_source="public final class PlanningToolStubs { public static void log(String m) {} }",
+    )
+
+    cached_result = orchestrator_cached.execute_with_retries(cached_request)
+
+    assert cached_result["success"] is True
+    assert never_planner.calls == 0
+    assert cache_compiler.calls == []

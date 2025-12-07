@@ -1,5 +1,6 @@
 """Planning helpers for generating Java plans."""
 
+from .executor import PlanExecutor
 from .java_plan_compiler import (
     CompilationError,
     JavaCompilationError,
@@ -21,6 +22,7 @@ __all__ = [
     "JavaCompilationError",
     "JavaCompilationResult",
     "JavaPlanCompiler",
+    "PlanExecutor",
     "JavaPlanFixer",
     "JavaPlanRequest",
     "JavaPlanResult",

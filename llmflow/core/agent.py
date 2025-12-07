@@ -29,14 +29,17 @@ from llmflow.planning import (
     ToolStubGenerationError,
     generate_tool_stub_class,
 )
+from llmflow.planning.janino_runner import JaninoPlanRunner, JaninoWorkerPool
 from llmflow.planning.plan_runner import PlanRunner
 from llmflow.telemetry.mermaid_recorder import MermaidSequenceRecorder
 from llmflow.tools import get_module_for_tool_name, load_tool_module
 from llmflow.tools.tool_registry import (
+    get_tool_function,
     get_tool_schema,
     get_tool_tags,
     get_tools_by_tags,
 )
+from llmflow.runtime.syscall_registry import SyscallRegistry
 
 from .agent_instrumentation import AgentInstrumentationMixin
 from .memory import Memory
@@ -125,16 +128,9 @@ class Agent(AgentInstrumentationMixin):
         self.plan_max_retries = max(plan_max_retries, 0)
         self._planner = planner or JavaPlanner(llm_client)
         self._plan_fixer = plan_fixer or JavaPlanFixer(llm_client)
-        if runner_factory is not None:
-            self._runner_factory = runner_factory
-        else:
-            self._runner_factory = self._build_default_runner_factory
-        self._orchestrator = PlanOrchestrator(
-            self._planner,
-            self._runner_factory,
-            max_retries=self.plan_max_retries,
-            plan_fixer=self._plan_fixer,
-        )
+        self._runner_factory = runner_factory
+        self._syscall_registry: Optional[SyscallRegistry] = None
+        self._worker_pool: Optional[JaninoWorkerPool] = None
 
         available_tool_names = self._discover_tool_names(
             available_tool_tags,
@@ -149,6 +145,15 @@ class Agent(AgentInstrumentationMixin):
         self.active_tools_schemas = self._build_tool_schemas(self.allowed_tools)
         self._tool_stub_class_name = _TOOL_STUB_CLASS_NAME
         self._tool_stub_source = self._build_tool_stub_source()
+        self._initialize_runtime()
+        if self._runner_factory is None:
+            self._runner_factory = self._build_default_runner_factory
+        self._orchestrator = PlanOrchestrator(
+            self._planner,
+            self._runner_factory,
+            max_retries=self.plan_max_retries,
+            plan_fixer=self._plan_fixer,
+        )
 
         self.enable_run_logging = enable_run_logging
         self._run_log_context: Optional[RunLogContext] = None
@@ -211,7 +216,22 @@ class Agent(AgentInstrumentationMixin):
     # Internal helpers
 
     def _build_default_runner_factory(self) -> PlanRunner:
-        return PlanRunner()
+        if self._worker_pool is None:
+            raise RuntimeError("Janino worker pool is not initialized")
+        return JaninoPlanRunner(self._worker_pool)
+
+    def _initialize_runtime(self) -> None:
+        self._syscall_registry = self._build_syscall_registry(self.allowed_tools)
+        self._worker_pool = JaninoWorkerPool(self._syscall_registry)
+
+    def _build_syscall_registry(self, tool_names: Sequence[str]) -> SyscallRegistry:
+        registry = SyscallRegistry()
+        for tool_name in tool_names:
+            fn = get_tool_function(tool_name)
+            if fn is None:
+                raise ValueError(f"Tool '{tool_name}' is not registered and cannot be bound to the runtime.")
+            registry.register(tool_name, fn)
+        return registry
 
     def _discover_tool_names(
         self,

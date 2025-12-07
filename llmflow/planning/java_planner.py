@@ -855,6 +855,7 @@ class JavaPlanRequest:
 
     task: str
     context: Optional[str] = None
+    goals: Sequence[str] = field(default_factory=list)
     tool_names: Sequence[str] = field(default_factory=list)
     tool_schemas: Sequence[Dict[str, Any]] = field(default_factory=list)
     additional_constraints: Sequence[str] = field(default_factory=list)
@@ -1165,6 +1166,10 @@ class JavaPlanner:
             metadata=metadata,
             prompt_hash=prompt_hash,
         )
+
+    def compute_prompt_hash(self, request: JavaPlanRequest) -> str:
+        messages = self._build_messages(request)
+        return _compute_prompt_hash(messages)
 
     def _generate_plain_plan(
         self,

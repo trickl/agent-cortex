@@ -83,6 +83,14 @@ class JavaPlanCompiler:
                     package_name,
                 )
             )
+            source_paths.append(
+                self._write_java_source(
+                    temp_dir,
+                    "PlanningToolRuntime",
+                    self._build_planning_tool_runtime_helper(package_name),
+                    package_name,
+                )
+            )
 
             if tool_stub_source and tool_stub_class_name:
                 stub_package = self._extract_package(tool_stub_source)
@@ -160,6 +168,37 @@ class JavaPlanCompiler:
         lines.append("")
         lines.append("    public static ToolResult empty() {")
         lines.append("        return new ToolResult();")
+        lines.append("    }")
+        lines.append("}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_planning_tool_runtime_helper(package_name: Optional[str]) -> str:
+        lines: List[str] = []
+        if package_name:
+            lines.append(f"package {package_name};")
+            lines.append("")
+        lines.append("import java.util.function.BiFunction;")
+        lines.append("")
+        lines.append("public final class PlanningToolRuntime {")
+        lines.append("    private static BiFunction<String, Object[], Object> INVOKER;")
+        lines.append("")
+        lines.append("    private PlanningToolRuntime() {}")
+        lines.append("")
+        lines.append("    public static synchronized void setInvoker(BiFunction<String, Object[], Object> invoker) {")
+        lines.append("        INVOKER = invoker;")
+        lines.append("    }")
+        lines.append("")
+        lines.append("    public static synchronized void clearInvoker() {")
+        lines.append("        INVOKER = null;")
+        lines.append("    }")
+        lines.append("")
+        lines.append("    public static Object invoke(String toolName, Object... args) {")
+        lines.append("        BiFunction<String, Object[], Object> invoker = INVOKER;")
+        lines.append("        if (invoker == null) {")
+        lines.append("            throw new IllegalStateException(\"PlanningToolRuntime invoker not set\");")
+        lines.append("        }")
+        lines.append("        return invoker.apply(toolName, args);")
         lines.append("    }")
         lines.append("}")
         return "\n".join(lines)

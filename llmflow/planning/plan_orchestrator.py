@@ -1,8 +1,12 @@
 """High-level orchestration with retry/repair loops for Java plans."""
 from __future__ import annotations
 
+import json
 import logging
+import re
+import shutil
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -15,12 +19,19 @@ from llmflow.logging_utils import (
 from .artifact_layout import (
     ensure_prompt_artifact_dir,
     format_artifact_attempt_label,
+    persist_compile_artifacts,
     reset_prompt_artifact_dir,
 )
+from .execution_artifacts import PlanExecutionArtifacts
 from .java_plan_compiler import JavaCompilationResult, JavaPlanCompiler
 from .java_plan_fixer import JavaPlanFixer, PlanFixerRequest, PlanFixerResult
 from .java_planner import JavaPlanRequest, JavaPlanResult, JavaPlanner, _compute_prompt_hash
+from .plan_cache import CachedPlan, PlanCache, compute_stub_hash
 from .plan_runner import PlanRunner
+
+
+_PLAN_CLASS_PATTERN = re.compile(r"(?:public\s+)?class\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)")
+_PACKAGE_PATTERN = re.compile(r"^\s*package\s+([A-Za-z_][\w\.]*?)\s*;", re.MULTILINE)
 
 
 class PlanOrchestrator:
@@ -38,6 +49,7 @@ class PlanOrchestrator:
         plan_fixer: Optional[JavaPlanFixer] = None,
         plan_fixer_max_attempts: int = 3,
         plan_artifact_root: Optional[Path] = None,
+        enable_plan_cache: bool = True,
     ) -> None:
         if max_retries < 0:
             raise ValueError("max_retries must be >= 0")
@@ -60,6 +72,8 @@ class PlanOrchestrator:
             self._plan_artifact_root = Path(plan_fixer.artifact_root)
         else:
             self._plan_artifact_root = Path("plans")
+        self._plan_cache = PlanCache(self._plan_artifact_root)
+        self._cache_enabled = bool(enable_plan_cache)
 
     def execute_with_retries(
         self,
@@ -81,18 +95,77 @@ class PlanOrchestrator:
         attempts: List[Dict[str, Any]] = []
         repair_hints: List[str] = []
 
-        for attempt_idx in range(self._max_retries + 1):
-            effective_request = self._augment_request(request, attempt_idx, repair_hints)
-            plan_result = self._planner.generate_plan(effective_request)
-            self._log_plan_attempt(attempt_idx + 1, plan_result)
-            plan_result, compile_attempts = self._compile_with_refinement(
-                effective_request,
-                plan_result,
-                attempt_number=attempt_idx + 1,
+        request = self._ensure_stub_class_name(request)
+        request.metadata = dict(request.metadata or {})
+        base_prompt_hash: Optional[str] = None
+        stub_hash: Optional[str] = None
+        cached_plan: Optional[CachedPlan] = None
+        artifact_bases: Dict[str, int] = {}
+        artifact_offsets: Dict[str, int] = {}
+
+        if self._cache_enabled:
+            base_prompt_hash = self._planner.compute_prompt_hash(request)
+            request.metadata.setdefault("plan_id", base_prompt_hash)
+            stub_hash = compute_stub_hash(request.tool_stub_source)
+            cached_plan = self._plan_cache.load(
+                base_prompt_hash,
+                stub_hash=stub_hash,
+                stub_class_name=request.tool_stub_class_name,
             )
-            compile_success = not compile_attempts or compile_attempts[-1]["success"]
+
+        def allocate_artifact_attempt(prompt_hash: Optional[str], fallback_attempt: int) -> int:
+            if not self._cache_enabled or not prompt_hash:
+                return fallback_attempt
+            if prompt_hash not in artifact_bases:
+                artifact_bases[prompt_hash] = self._plan_cache.highest_attempt(prompt_hash)
+            offset = artifact_offsets.get(prompt_hash, 0)
+            attempt_number = artifact_bases[prompt_hash] + offset + 1
+            artifact_offsets[prompt_hash] = offset + 1
+            return attempt_number
+
+        for attempt_idx in range(self._max_retries + 1):
+            artifacts: Optional[PlanExecutionArtifacts] = None
+            use_cache = attempt_idx == 0 and not repair_hints and cached_plan is not None
+            if use_cache:
+                plan_result = cached_plan.plan
+                artifact_attempt = cached_plan.attempt_number
+                compile_attempts = [
+                    {
+                        "iteration": 0,
+                        "success": True,
+                        "cached": True,
+                    }
+                ]
+                compile_success = True
+                tool_stub_class_name = request.tool_stub_class_name
+                artifacts = self._build_cached_artifacts(plan_result, cached_plan, tool_stub_class_name)
+                self._plan_logger.info(
+                    "java_plan cache_hit=1 plan_id=%s attempt=%s prompt_hash=%s",
+                    plan_result.plan_id,
+                    artifact_attempt,
+                    plan_result.prompt_hash,
+                )
+                cached_plan = None
+            else:
+                effective_request = self._augment_request(request, attempt_idx, repair_hints)
+                plan_result = self._planner.generate_plan(effective_request)
+                self._log_plan_attempt(attempt_idx + 1, plan_result)
+                artifact_prompt_hash = self._extract_prompt_hash(plan_result)
+                artifact_attempt = allocate_artifact_attempt(artifact_prompt_hash, attempt_idx + 1)
+                plan_result, compile_attempts, artifacts = self._compile_with_refinement(
+                    effective_request,
+                    plan_result,
+                    attempt_number=artifact_attempt,
+                    prompt_hash_override=artifact_prompt_hash,
+                )
+                compile_success = not compile_attempts or compile_attempts[-1]["success"]
+                tool_stub_class_name = effective_request.tool_stub_class_name
             if compile_success:
                 runner = self._runner_factory()
+                if hasattr(runner, "bind_plan_artifacts"):
+                    if artifacts is None:
+                        raise RuntimeError("Plan artifacts missing for artifact-aware runner")
+                    runner.bind_plan_artifacts(artifacts)
                 execution_result = runner.execute(
                     plan_result.plan_source,
                     capture_trace=capture_trace,
@@ -100,7 +173,7 @@ class PlanOrchestrator:
                     goal_summary=goal_summary,
                     deferred_metadata=self._clone_dict(deferred_metadata),
                     deferred_constraints=list(deferred_constraints) if deferred_constraints else None,
-                    tool_stub_class_name=effective_request.tool_stub_class_name,
+                    tool_stub_class_name=tool_stub_class_name,
                 )
             else:
                 execution_result = self._build_compile_failure_payload(compile_attempts[-1])
@@ -190,24 +263,45 @@ class PlanOrchestrator:
         initial_plan: JavaPlanResult,
         *,
         attempt_number: int,
-    ) -> Tuple[JavaPlanResult, List[Dict[str, Any]]]:
+        prompt_hash_override: Optional[str] = None,
+    ) -> Tuple[JavaPlanResult, List[Dict[str, Any]], Optional[PlanExecutionArtifacts]]:
         plan = initial_plan
         attempts: List[Dict[str, Any]] = []
         fixer_attempts = 0
         previous_error_count: Optional[int] = None
-        self._persist_plan_inputs(plan, base_request, attempt_number)
+        prompt_dir, attempt_dir = self._persist_plan_inputs(
+            plan,
+            base_request,
+            attempt_number,
+            prompt_hash_override=prompt_hash_override,
+        )
 
         for iteration in range(1, self._max_compile_refinements + 1):
+            iteration_dir = prompt_dir / format_artifact_attempt_label(attempt_number, iteration)
+            classes_workdir = iteration_dir / "classes"
+            self._reset_directory(classes_workdir)
             compile_result = self._plan_compiler.compile(
                 plan.plan_source,
                 tool_stub_source=base_request.tool_stub_source,
                 tool_stub_class_name=base_request.tool_stub_class_name,
+                working_dir=classes_workdir,
             )
+            persist_compile_artifacts(iteration_dir, compile_result)
             attempt_payload = self._format_compile_attempt(compile_result, iteration)
             attempts.append(attempt_payload)
             error_count = len(attempt_payload.get("errors") or [])
             if compile_result.success:
-                return plan, attempts
+                self._finalize_compile_success(attempt_dir, classes_workdir)
+                prompt_hash = prompt_hash_override or self._extract_prompt_hash(plan)
+                artifacts = self._build_execution_artifacts(
+                    plan=plan,
+                    attempt_dir=attempt_dir,
+                    attempt_number=attempt_number,
+                    prompt_hash=prompt_hash,
+                    tool_stub_class_name=base_request.tool_stub_class_name,
+                    classes_dir=attempt_dir / "classes",
+                )
+                return plan, attempts, artifacts
 
             can_fix = (
                 self._plan_fixer is not None
@@ -217,15 +311,7 @@ class PlanOrchestrator:
             if can_fix:
                 fixer_attempts += 1
                 previous_error_count = error_count
-                prompt_hash = (
-                    plan.prompt_hash
-                    or plan.metadata.get("prompt_hash")
-                    or (
-                        _compute_prompt_hash(plan.prompt_messages)
-                        if plan.prompt_messages
-                        else plan.plan_id
-                    )
-                )
+                prompt_hash = prompt_hash_override or self._extract_prompt_hash(plan)
                 fix_request = PlanFixerRequest(
                     plan_id=plan.plan_id,
                     plan_source=plan.plan_source,
@@ -237,12 +323,85 @@ class PlanOrchestrator:
                 )
                 fix_result = self._plan_fixer.fix_plan(fix_request, attempt=fixer_attempts)
                 plan = self._apply_plan_fix(plan, fix_result)
-                self._persist_plan_inputs(plan, base_request, attempt_number)
+                prompt_dir, attempt_dir = self._persist_plan_inputs(
+                    plan,
+                    base_request,
+                    attempt_number,
+                    prompt_hash_override=prompt_hash_override,
+                )
                 continue
 
             break
 
-        return plan, attempts
+        return plan, attempts, None
+
+    def _build_cached_artifacts(
+        self,
+        plan: JavaPlanResult,
+        cached_plan: CachedPlan,
+        tool_stub_class_name: Optional[str],
+    ) -> PlanExecutionArtifacts:
+        return self._build_execution_artifacts(
+            plan=plan,
+            attempt_dir=cached_plan.plan_dir,
+            attempt_number=cached_plan.attempt_number,
+            prompt_hash=cached_plan.prompt_hash,
+            tool_stub_class_name=tool_stub_class_name,
+            classes_dir=cached_plan.classes_dir,
+        )
+
+    def _build_execution_artifacts(
+        self,
+        *,
+        plan: JavaPlanResult,
+        attempt_dir: Path,
+        attempt_number: int,
+        prompt_hash: Optional[str],
+        tool_stub_class_name: Optional[str],
+        classes_dir: Optional[Path] = None,
+    ) -> PlanExecutionArtifacts:
+        plan_class = self._infer_class_name(plan.plan_source)
+        if plan_class is None:
+            raise RuntimeError("Unable to determine plan class name from source.")
+        classes_path = classes_dir or attempt_dir / "classes"
+        if not classes_path.exists():
+            raise RuntimeError(f"Compiled classes directory missing at {classes_path}")
+        stub_source_path: Optional[Path] = None
+        if tool_stub_class_name:
+            candidate = attempt_dir / f"{tool_stub_class_name}.java"
+            if candidate.exists():
+                stub_source_path = candidate
+        return PlanExecutionArtifacts(
+            plan_id=plan.plan_id,
+            attempt_number=attempt_number,
+            prompt_hash=prompt_hash,
+            attempt_dir=attempt_dir,
+            classes_dir=classes_path,
+            plan_class_name=plan_class,
+            stub_source_path=stub_source_path,
+            tool_stub_class_name=tool_stub_class_name,
+        )
+
+    @staticmethod
+    def _infer_class_name(source: Optional[str]) -> Optional[str]:
+        if not source:
+            return None
+        class_match = _PLAN_CLASS_PATTERN.search(source)
+        if not class_match:
+            return None
+        class_name = class_match.group("name")
+        package_match = _PACKAGE_PATTERN.search(source)
+        if package_match:
+            return f"{package_match.group(1)}.{class_name}"
+        return class_name
+
+    def _ensure_stub_class_name(self, request: JavaPlanRequest) -> JavaPlanRequest:
+        if request.tool_stub_class_name or not request.tool_stub_source:
+            return request
+        inferred = self._infer_class_name(request.tool_stub_source)
+        if not inferred:
+            return request
+        return replace(request, tool_stub_class_name=inferred)
 
     @staticmethod
     def _format_location_fragment(error: Any) -> str:
@@ -339,13 +498,11 @@ class PlanOrchestrator:
         plan: JavaPlanResult,
         request: JavaPlanRequest,
         attempt_number: int,
-    ) -> None:
-        prompt_hash = (
-            plan.prompt_hash
-            or plan.metadata.get("prompt_hash")
-            or (_compute_prompt_hash(plan.prompt_messages) if plan.prompt_messages else None)
-            or plan.plan_id
-        )
+        prompt_hash_override: Optional[str] = None,
+    ) -> Tuple[Path, Path]:
+        prompt_hash = prompt_hash_override or self._extract_prompt_hash(plan)
+        if prompt_hash is None:
+            prompt_hash = plan.plan_id
         if attempt_number == 1:
             prompt_dir = reset_prompt_artifact_dir(self._plan_artifact_root, prompt_hash, plan.plan_id)
         else:
@@ -371,6 +528,7 @@ class PlanOrchestrator:
                 stub_class = request.tool_stub_class_name or "PlanningToolStubs"
                 stub_path = base_dir / f"{stub_class}.java"
                 stub_path.write_text(request.tool_stub_source.strip() + "\n", encoding="utf-8")
+            self._write_plan_metadata(base_dir, plan, request, prompt_hash, attempt_number)
         except OSError as exc:  # pragma: no cover - filesystem issues are logged
             self._plan_logger.warning(
                 "plan_artifact_write_failed plan_id=%s attempt=%s error=%s",
@@ -378,6 +536,99 @@ class PlanOrchestrator:
                 attempt_number,
                 exc,
             )
+        return prompt_dir, base_dir
+
+    @staticmethod
+    def _extract_prompt_hash(plan: JavaPlanResult) -> Optional[str]:
+        if not plan:
+            return None
+        return (
+            plan.prompt_hash
+            or plan.metadata.get("prompt_hash")
+            or (_compute_prompt_hash(plan.prompt_messages) if plan.prompt_messages else None)
+        )
+
+    def _write_plan_metadata(
+        self,
+        attempt_dir: Path,
+        plan: JavaPlanResult,
+        request: JavaPlanRequest,
+        prompt_hash: str,
+        attempt_number: int,
+    ) -> None:
+        payload = {
+            "plan_id": plan.plan_id,
+            "prompt_hash": prompt_hash,
+            "plan_metadata": dict(plan.metadata or {}),
+            "prompt_messages": plan.prompt_messages,
+            "raw_response": plan.raw_response,
+            "artifact_attempt": attempt_number,
+            "tool_stub_class_name": request.tool_stub_class_name,
+            "tool_stub_hash": compute_stub_hash(request.tool_stub_source),
+            "stored_at": datetime.now(timezone.utc).isoformat(),
+        }
+        metadata_path = attempt_dir / "plan_metadata.json"
+        try:
+            serialized = json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                default=self._json_default,
+            )
+            metadata_path.write_text(serialized + "\n", encoding="utf-8")
+        except (OSError, TypeError) as exc:  # pragma: no cover - filesystem best-effort
+            self._plan_logger.warning(
+                "plan_metadata_write_failed plan_id=%s dir=%s error=%s",
+                plan.plan_id,
+                attempt_dir,
+                exc,
+            )
+
+    @staticmethod
+    def _reset_directory(path: Path) -> None:
+        if path.exists():
+            shutil.rmtree(path)
+        path.mkdir(parents=True, exist_ok=True)
+
+    def _finalize_compile_success(self, attempt_dir: Path, classes_src: Path) -> None:
+        classes_dest = attempt_dir / "classes"
+        if classes_dest.exists():
+            shutil.rmtree(classes_dest)
+        if classes_src.exists():
+            shutil.copytree(classes_src, classes_dest)
+        else:
+            classes_dest.mkdir(parents=True, exist_ok=True)
+        self._ensure_class_marker(classes_dest)
+        (attempt_dir / "clean").touch()
+
+    @staticmethod
+    def _ensure_class_marker(classes_dir: Path) -> None:
+        if classes_dir.exists() and any(classes_dir.rglob("*.class")):
+            return
+        classes_dir.mkdir(parents=True, exist_ok=True)
+        marker = classes_dir / "__compiled__.class"
+        marker.write_bytes(b"")
+
+    @staticmethod
+    def _json_default(value: Any) -> Any:  # pragma: no cover - serialization helper
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, Path):
+            return str(value)
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            try:
+                return model_dump()
+            except Exception:
+                pass
+        if hasattr(value, "__dict__"):
+            try:
+                return dict(value.__dict__)
+            except Exception:
+                pass
+        return str(value)
 
     @staticmethod
     def _format_error_hint(error: Dict[str, Any]) -> Optional[str]:

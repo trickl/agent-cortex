@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 import pytest
@@ -142,7 +143,14 @@ class DummyPlanCompiler:
         if not self._results:
             raise AssertionError("No compilation results remaining")
         self.calls.append({"plan_source": plan_source, **kwargs})
-        return self._results.pop(0)
+        result = self._results.pop(0)
+        working_dir = kwargs.get("working_dir")
+        if working_dir is not None:
+            work_path = Path(working_dir)
+            work_path.mkdir(parents=True, exist_ok=True)
+            if result.success:
+                (work_path / "Planner.class").write_bytes(b"")
+        return result
 
 
 @pytest.fixture

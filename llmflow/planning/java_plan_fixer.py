@@ -13,7 +13,11 @@ from pydantic import BaseModel, Field
 
 from llmflow.logging_utils import LLM_LOGGER_NAME, PLAN_LOGGER_NAME
 
-from .artifact_layout import ensure_prompt_artifact_dir, format_artifact_attempt_label
+from .artifact_layout import (
+    ensure_prompt_artifact_dir,
+    format_artifact_attempt_label,
+    persist_compile_artifacts,
+)
 from .java_plan_compiler import (
     CompilationError,
     JavaCompilationResult,
@@ -242,7 +246,7 @@ class JavaPlanFixer:
                 tool_stub_class_name=request.tool_stub_class_name,
                 working_dir=iteration_dir,
             )
-            self._persist_compile_artifacts(iteration_dir, compile_result)
+            persist_compile_artifacts(iteration_dir, compile_result)
             error_count = len(compile_result.errors)
             plan_logger.info(
                 "plan_fixer_compile plan_id=%s attempt=%s iteration=%s success=%s errors=%s dir=%s",
@@ -508,26 +512,6 @@ class JavaPlanFixer:
         if not filtered:
             return None
         return "\n\n".join(filtered)
-
-    def _persist_compile_artifacts(
-        self,
-        iteration_dir: Path,
-        compile_result: JavaCompilationResult,
-    ) -> None:
-        iteration_dir.mkdir(parents=True, exist_ok=True)
-        clean_path = iteration_dir / "clean"
-        errors_path = iteration_dir / "errors.log"
-        if compile_result.success:
-            clean_path.touch()
-            if errors_path.exists():
-                errors_path.unlink()
-            return
-        if clean_path.exists():
-            clean_path.unlink()
-        stderr = compile_result.stderr.strip() if compile_result.stderr else ""
-        if not stderr:
-            stderr = "\n".join(error.message for error in compile_result.errors)
-        errors_path.write_text(stderr or "Unknown compilation failure", encoding="utf-8")
 
     def _persist_patch_payload(
         self,

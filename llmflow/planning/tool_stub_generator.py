@@ -103,7 +103,7 @@ def generate_tool_stub_class(
 		lines.append(f"import {imp};")
 	if imports:
 		lines.append("")
-	lines.append("@SuppressWarnings(\"unused\")")
+	lines.append("@SuppressWarnings({\"unused\", \"unchecked\"})")
 	lines.append(f"public final class {class_name} {{")
 	lines.append(f"    private {class_name}() {{")
 	lines.append('        throw new AssertionError("Utility class");')
@@ -264,14 +264,55 @@ def _render_method(spec: JavaMethodSpec) -> List[str]:
 		lines.append("     * May return null when the tool does not provide a value.")
 	lines.append("     */")
 	params = ", ".join(f"{param.java_type} {param.name}" for param in spec.parameters)
-	lines.append(
-		f"    public static {spec.return_type} {spec.name}({params}) {{"
-	)
-	lines.append(
-		'        throw new UnsupportedOperationException("Stub for planning only.");'
-	)
+	lines.append(f"    public static {spec.return_type} {spec.name}({params}) {{")
+	lines.extend(_render_invocation_block(spec))
 	lines.append("    }")
 	return lines
+
+
+def _render_invocation_block(spec: JavaMethodSpec) -> List[str]:
+	block: List[str] = []
+	args_expr = _render_args_expression(spec.parameters)
+	block.append(args_expr)
+	tool_name = spec.name
+	if spec.return_type == "void":
+		block.append(f'        PlanningToolRuntime.invoke("{tool_name}", args);')
+		block.append("        return;")
+		return block
+	block.append(f'        Object __result = PlanningToolRuntime.invoke("{tool_name}", args);')
+	block.append(f"        return {_render_return_cast(spec.return_type)};")
+	return block
+
+
+def _render_args_expression(parameters: List[JavaParameter]) -> str:
+	if not parameters:
+		return "        Object[] args = new Object[0];"
+	rendered = ", ".join(param.name for param in parameters)
+	return f"        Object[] args = new Object[]{{{rendered}}};"
+
+
+def _render_return_cast(return_type: str) -> str:
+	primitive_casts = {
+		"int": "((Number) __result).intValue()",
+		"Integer": "(Integer) __result",
+		"long": "((Number) __result).longValue()",
+		"Long": "(Long) __result",
+		"double": "((Number) __result).doubleValue()",
+		"Double": "(Double) __result",
+		"float": "((Number) __result).floatValue()",
+		"Float": "(Float) __result",
+		"boolean": "((Boolean) __result).booleanValue()",
+		"Boolean": "(Boolean) __result",
+		"short": "((Number) __result).shortValue()",
+		"Short": "(Short) __result",
+		"byte": "((Number) __result).byteValue()",
+		"Byte": "(Byte) __result",
+		"char": "((Character) __result).charValue()",
+		"Character": "(Character) __result",
+	}
+	if return_type in primitive_casts:
+		return primitive_casts[return_type]
+	return f"({return_type}) __result"
 
 
 def _wrap_comment(text: str) -> List[str]:
