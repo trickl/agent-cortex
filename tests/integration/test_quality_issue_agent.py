@@ -99,15 +99,21 @@ def test_quality_issue_agent_closes_first_lint_issue_end_to_end(
         plan_retries = workflow.get("max_iterations")
     plan_retries = plan_retries if isinstance(plan_retries, int) and plan_retries >= 0 else 0
 
-    agent = Agent(
-        llm_client=llm_client,
-        system_prompt=agent_config["base_context"]["system_prompt"],
-        initial_goals=agent_goals,
-        available_tool_tags=include_tags,
-        match_all_tags=tag_settings.get("match_all", False),
-        plan_max_retries=plan_retries,
-        verbose=True,
-    )
+    base_context = agent_config.get("base_context", {})
+
+    agent_kwargs = {
+        "llm_client": llm_client,
+        "initial_goals": agent_goals,
+        "available_tool_tags": include_tags,
+        "match_all_tags": tag_settings.get("match_all", False),
+        "plan_max_retries": plan_retries,
+        "verbose": True,
+    }
+    system_prompt = base_context.get("system_prompt")
+    if system_prompt:
+        agent_kwargs["system_prompt"] = system_prompt
+
+    agent = Agent(**agent_kwargs)
 
     activated_tool_names = {
         schema["function"]["name"] for schema in agent.active_tools_schemas
@@ -119,12 +125,14 @@ def test_quality_issue_agent_closes_first_lint_issue_end_to_end(
     assert agent.available_tool_tags == include_tags
     assert agent.plan_max_retries == plan_retries
 
-    user_prompt = (
-        f"Target owner/project: {owner_key}/{project_key}. "
-        f"Repository URL: {repo_url} (slug {repo_slug}). "
-        "Use your workflow to address the first open lint issue returned by the Qlty tools, "
-        "or state clearly that no lint issues are currently open before stopping."
-    )
+    prompt_template = base_context.get("user_prompt")
+    assert prompt_template, "Agent configuration must define base_context.user_prompt"
+    user_prompt = prompt_template.format(
+        owner_key=owner_key,
+        project_key=project_key,
+        repo_url=repo_url,
+        repo_slug=repo_slug,
+    ).strip()
 
     final_message = agent.add_user_message_and_run(user_prompt)
 

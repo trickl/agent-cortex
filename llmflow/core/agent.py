@@ -39,32 +39,36 @@ from llmflow.tools.tool_registry import (
 )
 
 from .agent_instrumentation import AgentInstrumentationMixin
-from .goals import GoalManager
 from .memory import Memory
 
 
 _JAVA_PLANNING_GUIDANCE = (
     "Create formatted Java code to accomplish the user's task and emit only Java source."
+    "Include a single main method and aim to call a series of two to seven methods to decompose the work."
     "Use the provided PlanningToolStubs class to invoke the registered planning tools by calling "
     "PlanningToolStubs.<toolName>(...) exactly as shown in the stub source; never call raw tool "
     "functions directly."
+    "Define helper methods as needed to break down complex or long logic."
+    "Do not implement detailed logic directly in the main method; instead, delegate to helper methods."
+    "Each helper method should either call one or more PlanningToolStubs methods or contain a descriptive comment "
+    "explaining the intended functionality."
     "Comment out helper bodies when a step cannot yet be implemented, but prefer concrete tool "
     "calls whenever a registered tool can perform the work.\n\n"
     "Example Planner:\n"
     "```java\n"
     "public class Planner {\n"
     "    public static void main(String[] args) throws Exception {\n"
-    "        Map<String, Object> issue = PlanningToolStubs.qlty_get_first_issue();\n"
-    "        if (issue == null) {\n"
-    "            System.out.println(\"No lint issues remaining.\");\n"
+    "        Map<String, Object> returnValue = PlanningToolStubs.getItemOfInterest();\n"
+    "        if (returnValue == null) {\n"
+    "            System.out.println(\"No item of interest.\");\n"
     "            return;\n"
     "        }\n"
-    "        PlanningToolStubs.git_create_branch(\"fix/issue-\" + issue.get(\"slug\"));\n"
-    "        inspectIssue(issue);\n"
+    "        PlanningToolStubs.atomicToolAction(\"example\" + returnValue.get(\"slug\"));\n"
+    "        processValue(returnValue);\n"
     "    }\n\n"
-    "    private static void inspectIssue(Map<String, Object> issue) throws Exception {\n"
-    "        String path = (String) issue.get(\"path\");\n"
-    "        PlanningToolStubs.read_file(path);\n"
+    "    private static void processValue(Map<String, Object> returnValue) throws Exception {\n"
+    "        String path = (String) returnValue.get(\"path\");\n"
+    "        PlanningToolStubs.doAction(path);\n"
     "        // TODO: add concrete fixes using other PlanningToolStubs helpers.\n"
     "    }\n"
     "}\n"
@@ -107,7 +111,6 @@ class Agent(AgentInstrumentationMixin):
         enable_run_logging: bool = True,
     ):
         self.llm_client = llm_client
-        self.goal_manager = GoalManager(initial_goals=initial_goals)
         self.system_prompt, self._system_prompt_template_preview = self._render_system_prompt(
             system_prompt
         )
@@ -187,7 +190,6 @@ class Agent(AgentInstrumentationMixin):
                 plan_request,
                 capture_trace=self._capture_trace,
                 metadata={"allowed_tools": list(self.allowed_tools)},
-                goal_summary=self.goal_manager.get_goals_for_prompt(),
             )
             final_message = self._finalize_plan_result(result)
             if final_message:
@@ -285,28 +287,28 @@ class Agent(AgentInstrumentationMixin):
             return None
 
     def _build_plan_request(self, user_input: str) -> JavaPlanRequest:
-        goals = [goal.description for goal in self.goal_manager.goals]
         task = self._format_planner_task(user_input)
         context = self._build_planner_context()
         return JavaPlanRequest(
             task=task,
-            goals=goals,
             context=context,
             tool_names=self.allowed_tools,
             tool_schemas=self.active_tools_schemas,
             tool_stub_source=self._tool_stub_source,
             tool_stub_class_name=self._tool_stub_class_name if self._tool_stub_source else None,
             metadata={
-                "goal_count": len(goals),
                 "source": "llmflow.core.agent",
             },
         )
 
     def _format_planner_task(self, user_input: str) -> str:
         header = (
-            "Create a Java class named Planner that carries out the user's request. "
-            "Keep the structure minimal, lean on helper methods for decomposition, and "
-            "invoke planning tools via the provided stub class when a step can be executed directly."
+            "Create a Java class named Planner that carries out the user's request."
+            " Keep the structure minimal, lean on helper methods for decomposition, and"
+            " invoke planning tools via the provided stub class when a step can be executed directly."
+            " Break down complex tasks into smaller sub-tasks. Each sub-task should either be a stubbed method or a helper method."
+            " Stubbed methods should just contain a descriptive comment of their intended functionality."
+            " The problem should be decomposed into manageable pieces using helper methods."
         )
         normalized = user_input.strip()
         if not normalized:
@@ -317,35 +319,9 @@ class Agent(AgentInstrumentationMixin):
         sections: List[str] = []
         if self._last_run_summary:
             sections.append(f"Previous plan summary:\n{self._last_run_summary.strip()}")
-        recent_memory = self._format_recent_memory(limit=4, include_placeholder=False)
-        if recent_memory:
-            sections.append(recent_memory)
         if not sections:
             return None
         return "\n\n".join(sections).strip()
-
-    def _format_recent_memory(self, limit: int = 6, include_placeholder: bool = True) -> str:
-        recent = self.memory.get_last_n_messages(limit, as_dicts=True)
-        if not recent:
-            return "No prior conversation." if include_placeholder else ""
-        lines: List[str] = ["Recent conversation:"]
-        include_count = 0
-        for message in recent:
-            role = message.get("role", "unknown")
-            if role == "system":
-                continue
-            content = message.get("content")
-            if isinstance(content, str):
-                snippet = content.strip()
-            else:
-                snippet = json.dumps(content, ensure_ascii=False)
-            if not snippet:
-                continue
-            lines.append(f"- {role}: {snippet}")
-            include_count += 1
-        if include_count == 0:
-            return "No prior conversation." if include_placeholder else ""
-        return "\n".join(lines)
 
     def _finalize_plan_result(self, result: Dict[str, Any]) -> str:
         summary = result.get("summary")
@@ -354,7 +330,7 @@ class Agent(AgentInstrumentationMixin):
             return self._format_success_message(execution, summary)
         errors = execution.get("errors") or []
         if errors:
-            return self._format_failure_message(errors, summary)
+            return self._format_failure_message(execution, errors, summary)
         if summary:
             return summary
         return "Plan run finished without additional details."
@@ -372,10 +348,64 @@ class Agent(AgentInstrumentationMixin):
                 return json.dumps(return_value, ensure_ascii=False, indent=2)
             except TypeError:
                 return str(return_value)
-        return summary or "✅ Java plan run completed successfully."
+        base_message = summary or "✅ Java plan run completed successfully."
+        capability_note = self._summarize_execution_capabilities(execution)
+        if capability_note:
+            return f"{base_message}\n{capability_note}"
+        return base_message
+
+    def _summarize_execution_capabilities(self, execution: Dict[str, Any]) -> Optional[str]:
+        metadata = execution.get("metadata") or {}
+        allowed_tools = metadata.get("allowed_tools")
+        if not allowed_tools:
+            return None
+        if isinstance(allowed_tools, (str, bytes)):
+            normalized_tools = {str(allowed_tools).strip()}
+        else:
+            normalized_tools = {str(tool).strip() for tool in allowed_tools if str(tool).strip()}
+        if not normalized_tools:
+            return None
+        lowered = {tool.lower() for tool in normalized_tools}
+        notes: List[str] = []
+        if any("pull_request" in name or "pullrequest" in name for name in lowered):
+            notes.append("ready to create a pull request")
+        if any("qlty" in name and "issue" in name for name in lowered):
+            notes.append("will report when no lint issues remain")
+        for tag_note in self._capabilities_from_tags():
+            if tag_note not in notes:
+                notes.append(tag_note)
+        if not notes:
+            return None
+        detail = self._join_human_list(notes)
+        return f"Capabilities: {detail}."
+
+    @staticmethod
+    def _join_human_list(items: Sequence[str]) -> str:
+        if not items:
+            return ""
+        if len(items) == 1:
+            return items[0]
+        if len(items) == 2:
+            return f"{items[0]} and {items[1]}"
+        head = ", ".join(items[:-1])
+        return f"{head}, and {items[-1]}"
+
+    def _capabilities_from_tags(self) -> List[str]:
+        tags = {
+            str(tag).strip().lower()
+            for tag in (self.available_tool_tags or [])
+            if tag and str(tag).strip()
+        }
+        notes: List[str] = []
+        if "git" in tags:
+            notes.append("ready to create a pull request")
+        if "qlty" in tags:
+            notes.append("will report when no lint issues remain")
+        return notes
 
     def _format_failure_message(
         self,
+        execution: Dict[str, Any],
         errors: Sequence[Dict[str, Any]],
         summary: Optional[str],
     ) -> str:
@@ -392,9 +422,13 @@ class Agent(AgentInstrumentationMixin):
             location.append(loc)
         suffix = f" ({'; '.join(location)})" if location else ""
         base = f"❌ {err_type}: {message}{suffix}"
+        lines = [base]
         if summary:
-            return f"{base}\n{summary}"
-        return base
+            lines.append(summary)
+        capability_note = self._summarize_execution_capabilities(execution)
+        if capability_note:
+            lines.append(capability_note)
+        return "\n".join(lines)
 
     def _append_context_trace(self, result: Dict[str, Any]) -> None:
         entry = {
@@ -407,9 +441,6 @@ class Agent(AgentInstrumentationMixin):
         if len(self.context_trace) > self._MAX_CONTEXT_TRACE:
             self.context_trace.pop(0)
         self._record_context_snapshot("post_plan_execution")
-
-    def _pending_goal_count(self) -> int:
-        return sum(1 for goal in self.goal_manager.goals if not goal.completed)
 
     def _render_system_prompt(self, base_prompt: str) -> tuple[str, str]:
         prompt = (base_prompt or "").strip()

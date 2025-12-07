@@ -177,10 +177,9 @@ class AgentInstrumentationMixin:
 
         if self._run_log_context:
             logging.getLogger(PLAN_LOGGER_NAME).info(
-                "stage=%s iteration=%s pending_goals=%s messages=%s approx_chars=%s tool_messages=%s",
+                "stage=%s iteration=%s messages=%s approx_chars=%s tool_messages=%s",
                 stage,
                 self.current_iteration,
-                self._pending_goal_count(),
                 msg_count,
                 approx_chars,
                 tool_messages,
@@ -189,7 +188,6 @@ class AgentInstrumentationMixin:
                 self._mermaid_recorder.record_plan_attempt(
                     self.current_iteration,
                     "snapshot",
-                    f"pending_goals={self._pending_goal_count()}",
                 )
         if self.verbose:
             print(

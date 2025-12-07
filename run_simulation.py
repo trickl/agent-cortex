@@ -122,15 +122,5 @@ def run_agent_simulation():
         final_message = ai_agent.add_user_message_and_run(user_input)
         print(f"\nAssistant: {final_message}")
 
-    print("\n--- AGENT SIMULATION END ---")
-    print("Final Goals Status:")
-    print(ai_agent.goal_manager.get_goals_for_prompt())
-    print("\nFinal Memory (last 5 messages):")
-    for msg_dict in ai_agent.memory.get_last_n_messages(5, as_dicts=True):
-        role = msg_dict.get('role')
-        content = str(msg_dict.get('content',''))[:100] + ("..." if len(str(msg_dict.get('content',''))) > 100 else "")
-        tool_calls = msg_dict.get('tool_calls')
-        print(f"  {role}: {content} {json.dumps(tool_calls) if tool_calls else ''}")
-
 if __name__ == "__main__":
     run_agent_simulation() 

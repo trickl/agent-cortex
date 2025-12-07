@@ -70,6 +70,22 @@ class PlainFallbackRetryClient:
         return {"content": self.fallback_plan}
 
 
+class PlainOnlyLLMClient:
+    def __init__(self, fallback_plan=JAVA_PLAN):
+        self.fallback_plan = fallback_plan
+        self.provider = type("Provider", (), {"max_retries": 0})()
+        self.generate_calls = 0
+        self.messages = None
+
+    def structured_generate(self, **kwargs):  # pragma: no cover - should not run
+        raise AssertionError("structured_generate should not be called when disabled")
+
+    def generate(self, *, messages, **kwargs):
+        self.generate_calls += 1
+        self.messages = messages
+        return {"content": self.fallback_plan}
+
+
 class FakeCompletion:
     def __init__(self, payload):
         self._payload = payload
@@ -101,10 +117,9 @@ def _format_log_call(call):
 
 def test_planner_builds_prompt_and_returns_plan():
     client = DummyLLMClient({"java": JAVA_PLAN})
-    planner = JavaPlanner(client, specification="SPEC CONTENT")
+    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
     request = JavaPlanRequest(
         task="Fix the reported lint issue",
-        goals=["Diagnose the lint failure", "Apply a minimal patch"],
         context="Repository: example, Branch: main",
         tool_names=["log", "cloneRepo"],
         tool_stub_class_name="PlanningToolStubs",
@@ -114,7 +129,7 @@ def test_planner_builds_prompt_and_returns_plan():
 
     assert result.plan_source.startswith("public class Plan")
     assert result.metadata["allowed_tools"] == ["cloneRepo", "log"]
-    assert "available_tools" in client.messages[0]["content"]
+    assert "structured output" in client.messages[0]["content"]
     user_prompt = client.messages[1]["content"]
     assert "Use the static methods on PlanningToolStubs" in user_prompt
     assert "Available planning tools" not in user_prompt
@@ -130,7 +145,7 @@ def test_planner_builds_prompt_and_returns_plan():
 
 def test_planner_includes_planner_notes():
     client = DummyLLMClient({"java": JAVA_PLAN, "notes": "ok"})
-    planner = JavaPlanner(client, specification="SPEC CONTENT")
+    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
     result = planner.generate_plan(JavaPlanRequest(task="Do work"))
 
     assert result.plan_source == JAVA_PLAN
@@ -139,7 +154,7 @@ def test_planner_includes_planner_notes():
 
 def test_planner_flattens_list_notes():
     client = DummyLLMClient({"java": JAVA_PLAN, "notes": ["first", "second"]})
-    planner = JavaPlanner(client, specification="SPEC CONTENT")
+    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
     result = planner.generate_plan(JavaPlanRequest(task="Do work"))
 
     assert result.metadata.get("planner_notes") == "first\n\nsecond"
@@ -147,7 +162,7 @@ def test_planner_flattens_list_notes():
 
 def test_planner_raises_when_java_missing():
     client = DummyLLMClient({"java": ""})
-    planner = JavaPlanner(client, specification="SPEC CONTENT")
+    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
 
     with pytest.raises(JavaPlanningError):
         planner.generate_plan(JavaPlanRequest(task="Summarize"))
@@ -155,7 +170,7 @@ def test_planner_raises_when_java_missing():
 
 def test_planner_includes_tool_stubs_in_system_prompt():
     client = DummyLLMClient({"java": JAVA_PLAN})
-    planner = JavaPlanner(client, specification="SPEC CONTENT")
+    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
     stub_source = "public final class DemoTools { public static void call() {} }"
 
     planner.generate_plan(
@@ -174,7 +189,7 @@ def test_planner_includes_tool_stubs_in_system_prompt():
 
 def test_planner_includes_refinement_context_in_user_prompt():
     client = DummyLLMClient({"java": JAVA_PLAN})
-    planner = JavaPlanner(client, specification="SPEC CONTENT")
+    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
     request = JavaPlanRequest(
         task="Do work",
         prior_plan_source="public class Bad { void main() {} }",
@@ -202,7 +217,7 @@ def test_planner_logs_instructor_failure(monkeypatch):
     completion = FakeCompletion({"java": JAVA_PLAN, "notes": "bad"})
     exception = FakeInstructorException([completion])
     client = FailingLLMClient(exception)
-    planner = JavaPlanner(client, specification="SPEC CONTENT")
+    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
 
     planner.generate_plan(JavaPlanRequest(task="Do work", metadata={"plan_id": "plan-123"}))
 
@@ -333,7 +348,7 @@ def test_log_files_capture_request_and_plan(monkeypatch):
     completion = FakeCompletion({"java": JAVA_PLAN})
     exception = FakeInstructorException([completion])
     client = FailingLLMClient(exception)
-    planner = JavaPlanner(client, specification="SPEC CONTENT")
+    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
 
     try:
         planner.generate_plan(JavaPlanRequest(task="Do work", metadata={"plan_id": "plan-logs"}))
@@ -358,7 +373,12 @@ def test_log_files_capture_request_and_plan(monkeypatch):
 
 def test_planner_allows_retry_override():
     client = DummyLLMClient({"java": JAVA_PLAN})
-    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_max_retries=2)
+    planner = JavaPlanner(
+        client,
+        specification="SPEC CONTENT",
+        structured_max_retries=2,
+        structured_enabled=True,
+    )
 
     planner.generate_plan(JavaPlanRequest(task="Do work"))
 
@@ -368,10 +388,46 @@ def test_planner_allows_retry_override():
     assert callable(log_context.get("completion_logger"))
 
 
+def test_planner_defaults_to_plain_generation(monkeypatch):
+    monkeypatch.delenv("LLMFLOW_PLANNER_ENABLE_STRUCTURED", raising=False)
+    monkeypatch.delenv("LLMFLOW_PLANNER_DISABLE_STRUCTURED", raising=False)
+    client = PlainOnlyLLMClient()
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
+
+    result = planner.generate_plan(JavaPlanRequest(task="Do work"))
+
+    assert result.plan_source == JAVA_PLAN
+    assert client.generate_calls == 1
+
+
+def test_planner_enable_env_allows_structured(monkeypatch):
+    monkeypatch.setenv("LLMFLOW_PLANNER_ENABLE_STRUCTURED", "1")
+    monkeypatch.delenv("LLMFLOW_PLANNER_DISABLE_STRUCTURED", raising=False)
+    client = DummyLLMClient({"java": JAVA_PLAN})
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
+
+    result = planner.generate_plan(JavaPlanRequest(task="Do work"))
+
+    assert result.plan_source == JAVA_PLAN
+    assert client.kwargs.get("max_retries") == 2
+
+
+def test_planner_disable_env_overrides_enable(monkeypatch):
+    monkeypatch.setenv("LLMFLOW_PLANNER_ENABLE_STRUCTURED", "1")
+    monkeypatch.setenv("LLMFLOW_PLANNER_DISABLE_STRUCTURED", "true")
+    client = PlainOnlyLLMClient()
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
+
+    result = planner.generate_plan(JavaPlanRequest(task="Do work"))
+
+    assert result.plan_source == JAVA_PLAN
+    assert client.generate_calls == 1
+
+
 def test_planner_env_var_controls_retry(monkeypatch):
     client = DummyLLMClient({"java": JAVA_PLAN})
     monkeypatch.setenv("LLMFLOW_PLANNER_STRUCTURED_MAX_RETRIES", "5")
-    planner = JavaPlanner(client, specification="SPEC CONTENT")
+    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
 
     planner.generate_plan(JavaPlanRequest(task="Do work"))
 
@@ -415,7 +471,7 @@ def test_planner_payload_handles_json_wrapped_ast_string():
 def test_plain_fallback_sends_retry_prompt():
     exception = RuntimeError("Missing field 'java'")
     client = PlainFallbackRetryClient(exception)
-    planner = JavaPlanner(client, specification="SPEC CONTENT")
+    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
 
     result = planner.generate_plan(JavaPlanRequest(task="Handle retries"))
 
@@ -434,7 +490,7 @@ def test_planner_logs_llm_request_payload(monkeypatch):
     monkeypatch.setattr(jp.llm_logger, "info", mock_llm_info)
 
     client = DummyLLMClient({"java": JAVA_PLAN})
-    planner = JavaPlanner(client, specification="SPEC CONTENT")
+    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
 
     planner.generate_plan(JavaPlanRequest(task="Capture request"))
 

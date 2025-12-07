@@ -230,6 +230,7 @@ class PlanOrchestrator:
                     plan_id=plan.plan_id,
                     plan_source=plan.plan_source,
                     prompt_hash=prompt_hash,
+                    task=base_request.task,
                     compile_errors=compile_result.errors,
                     tool_stub_source=base_request.tool_stub_source,
                     tool_stub_class_name=base_request.tool_stub_class_name,

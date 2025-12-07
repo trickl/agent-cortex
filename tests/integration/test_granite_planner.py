@@ -173,7 +173,7 @@ def test_granite_structured_java_plan_levels(scenario: dict[str, object]) -> Non
         llm_client = LLMClient(config_file=str(_TEST_CONFIG_PATH))
     except RuntimeError as exc:
         pytest.skip(f"Ollama server unavailable or lacks tool support: {exc}")
-    planner = JavaPlanner(llm_client)
+    planner = JavaPlanner(llm_client, structured_enabled=True)
 
     request = JavaPlanRequest(
         task=scenario["task"],

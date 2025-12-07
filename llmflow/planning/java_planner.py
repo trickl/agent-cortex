@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Match, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -30,6 +30,8 @@ _EMBEDDED_SPEC = (
     "avoid markdown, and emit compilable Java source."
 )
 _STRUCTURED_MAX_RETRIES_ENV = "LLMFLOW_PLANNER_STRUCTURED_MAX_RETRIES"
+_STRUCTURED_DISABLED_ENV = "LLMFLOW_PLANNER_DISABLE_STRUCTURED"
+_STRUCTURED_ENABLE_ENV = "LLMFLOW_PLANNER_ENABLE_STRUCTURED"
 _PLAIN_FALLBACK_MAX_ATTEMPTS = 2
 _PLANNER_TOOL_NAME = "define_java_plan"
 
@@ -54,6 +56,10 @@ def _read_structured_retry_limit() -> Optional[int]:
         return None
     return parsed
 
+
+def _is_truthy(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
 logger = logging.getLogger(__name__)
 plan_logger = logging.getLogger(PLAN_LOGGER_NAME)
 llm_logger = logging.getLogger(LLM_LOGGER_NAME)
@@ -67,6 +73,9 @@ _LIKELY_JAVA_PREFIX_PATTERN = re.compile(
     r"^(?:package\s+|import\s+|(?:public|protected|private|abstract|final|static)\b|class\s+|interface\s+|enum\s+|record\s+|@|/\*|//|\*)",
 )
 _TOKEN_COUNT_PATTERN = re.compile(r"\S+")
+_MIN_MEANINGFUL_PLAN_LINES = 3
+_ELLIPSIS_BLOCK_PATTERN = re.compile(r"\{\s*\.\.\.\s*\}")
+_ESCAPE_SEQUENCE_PATTERN = re.compile(r"\\(u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|[\\\"'nrtbf])")
 
 
 def _compute_prompt_hash(messages: Sequence[Dict[str, Any]]) -> str:
@@ -101,7 +110,32 @@ def _normalize_java_source(source: str) -> str:
         if wrapped and _CLASS_DECL_PATTERN.search(wrapped):
             return wrapped.strip()
         raise ValueError("Java payload must declare a top-level class.")
-    return candidate.strip()
+    normalized = candidate.strip()
+    _validate_plan_structure(normalized)
+    return normalized
+
+
+def _validate_plan_structure(source: str) -> None:
+    if _ELLIPSIS_BLOCK_PATTERN.search(source):
+        raise ValueError("Java payload contains placeholder ellipses; provide actual code.")
+    if _count_meaningful_lines(source) < _MIN_MEANINGFUL_PLAN_LINES:
+        raise ValueError(
+            f"Java payload must include at least {_MIN_MEANINGFUL_PLAN_LINES} meaningful lines of code."
+        )
+
+
+def _count_meaningful_lines(source: str) -> int:
+    count = 0
+    for line in source.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if all(ch in "{}();," for ch in stripped):
+            continue
+        count += 1
+        if count >= _MIN_MEANINGFUL_PLAN_LINES:
+            break
+    return count
 
 
 def _extract_java_candidate(source: str) -> str:
@@ -624,11 +658,49 @@ def _decode_plan_string(value: str) -> Any:
         except json.JSONDecodeError:
             pass
     if any(seq in stripped for seq in ("\\n", "\\t", "\\r", '\\"')):
-        try:
-            return bytes(stripped, "utf-8").decode("unicode_escape")
-        except Exception:  # pragma: no cover - best effort only
-            return stripped
+        decoded = _try_unicode_escape_decode(stripped)
+        if decoded is not None:
+            return decoded
+        return _best_effort_unescape_literals(stripped)
     return stripped
+
+
+def _try_unicode_escape_decode(text: str) -> Optional[str]:
+    try:
+        return bytes(text, "utf-8").decode("unicode_escape")
+    except Exception:  # pragma: no cover - best effort only
+        return None
+
+
+def _best_effort_unescape_literals(text: str) -> str:
+    mapping = {
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "b": "\b",
+        "f": "\f",
+        "\\": "\\",
+        '"': '"',
+        "'": "'",
+    }
+
+    def _replace(match: re.Match[str]) -> str:
+        token = match.group(1)
+        if not token:
+            return match.group(0)
+        if token.startswith("u") and len(token) == 5:
+            try:
+                return chr(int(token[1:], 16))
+            except ValueError:
+                return match.group(0)
+        if token.startswith("x") and len(token) == 3:
+            try:
+                return chr(int(token[1:], 16))
+            except ValueError:
+                return match.group(0)
+        return mapping.get(token, match.group(0))
+
+    return _ESCAPE_SEQUENCE_PATTERN.sub(_replace, text)
 
 
 def _format_plan_text(text: str) -> str:
@@ -782,7 +854,6 @@ class JavaPlanRequest:
     """Inputs that describe what the planner should generate."""
 
     task: str
-    goals: Sequence[str] = field(default_factory=list)
     context: Optional[str] = None
     tool_names: Sequence[str] = field(default_factory=list)
     tool_schemas: Sequence[Dict[str, Any]] = field(default_factory=list)
@@ -885,6 +956,7 @@ class JavaPlanner:
         specification: Optional[str] = None,
         specification_path: Optional[Path] = None,
         structured_max_retries: Optional[int] = None,
+        structured_enabled: Optional[bool] = None,
     ):
         self._llm_client = llm_client
         self._specification = self._load_specification(specification, specification_path)
@@ -893,8 +965,42 @@ class JavaPlanner:
             "type": "function",
             "function": {"name": _PLANNER_TOOL_NAME},
         }
-        self._structured_max_retries = self._resolve_structured_retry_limit(structured_max_retries)
+        self._structured_enabled = self._resolve_structured_enabled(structured_enabled)
+        self._structured_max_retries = (
+            self._resolve_structured_retry_limit(structured_max_retries)
+            if self._structured_enabled
+            else 0
+        )
         
+    def _resolve_structured_enabled(self, explicit: Optional[bool]) -> bool:
+        if explicit is not None:
+            return bool(explicit)
+        disable_raw = os.getenv(_STRUCTURED_DISABLED_ENV)
+        enable_raw = os.getenv(_STRUCTURED_ENABLE_ENV)
+
+        if disable_raw is not None and _is_truthy(disable_raw):
+            if enable_raw:
+                logger.warning(
+                    "Both %s and %s are set; structured planner will remain disabled.",
+                    _STRUCTURED_ENABLE_ENV,
+                    _STRUCTURED_DISABLED_ENV,
+                )
+            return False
+
+        if enable_raw is not None:
+            enabled = _is_truthy(enable_raw)
+            if enabled:
+                logger.info("Structured planner enabled via %s", _STRUCTURED_ENABLE_ENV)
+            else:
+                logger.info("Structured planner explicitly disabled via %s", _STRUCTURED_ENABLE_ENV)
+            return enabled
+
+        logger.info(
+            "Structured planner defaulting to disabled. Set %s=1 or pass structured_enabled=True to enable.",
+            _STRUCTURED_ENABLE_ENV,
+        )
+        return False
+
     def _resolve_structured_retry_limit(self, explicit: Optional[int]) -> int:
         if explicit is not None:
             value = explicit
@@ -928,104 +1034,119 @@ class JavaPlanner:
         request_start = time.perf_counter()
         retries = self._structured_max_retries
         status_prefix = "[JavaPlanner]"
-        print(
-            f"{status_prefix} Requesting structured Java plan (tools={request.tool_names or ['none']}, retries={retries})",
-            flush=True,
-        )
-        logger.info(
-            "%s Requesting structured Java plan (tools=%s, retries=%s)",
-            status_prefix,
-            request.tool_names or ["none"],
-            retries,
-        )
-        plan_logger.info(
-            "planner_request plan_id=%s tools=%s retries=%s goals=%s context=%s",
-            plan_id,
-            request.tool_names or ["none"],
-            retries,
-            len(request.goals or []),
-            bool(request.context),
-        )
-        prompt_hash = _compute_prompt_hash(messages)
-        _log_llm_request(plan_id, messages, request)
-        try:
-            payload = self._llm_client.structured_generate(
-                messages=messages,
-                response_model=_PlannerToolPayload,
-                tools=[self._planner_tool_schema],
-                tool_choice=self._planner_tool_choice,
-                max_retries=self._structured_max_retries,
-                log_context={
-                    "logger_name": PLAN_LOGGER_NAME,
-                    "prefix": f"plan_id={plan_id}",
-                    "completion_logger": lambda attempt, completion: _log_structured_attempt_completion(
-                        plan_id,
-                        attempt,
-                        completion,
-                    ),
-                },
-            )
-        except Exception as exc:  # pragma: no cover - provider dependent
-            elapsed = time.perf_counter() - request_start
+        if self._structured_enabled:
             print(
-                f"{status_prefix} Structured plan request failed after {elapsed:.1f}s: {exc}",
-                flush=True,
-            )
-            logger.warning(
-                "%s Structured plan request failed after %.1fs: %s",
-                status_prefix,
-                elapsed,
-                exc,
-            )
-            plan_logger.warning(
-                "planner_structured_failure plan_id=%s elapsed=%.1fs error=%s",
-                plan_id,
-                elapsed,
-                exc,
-            )
-            _log_structured_failure_details(plan_id, exc)
-            friendly = _summarize_structured_failure(exc)
-            if friendly:
-                logger.warning("%s Falling back to plain-text parsing.", friendly)
-                plan_logger.warning(
-                    "planner_structured_reason plan_id=%s detail=%s",
-                    plan_id,
-                    friendly,
-                )
-            else:
-                logger.warning(
-                    "Structured Java plan generation failed; attempting plain-text fallback.",
-                    exc_info=exc,
-                )
-            plan_logger.info("planner_plain_fallback plan_id=%s", plan_id)
-            failure_reason = friendly or str(exc)
-            plan_source, raw_response, notes = self._generate_plain_plan(
-                messages,
-                plan_id=plan_id,
-                failure_reason=failure_reason,
-            )
-        else:
-            elapsed = time.perf_counter() - request_start
-            print(
-                f"{status_prefix} Structured plan ready in {elapsed:.1f}s (notes={bool(payload.notes)})",
+                f"{status_prefix} Requesting structured Java plan (tools={request.tool_names or ['none']}, retries={retries})",
                 flush=True,
             )
             logger.info(
-                "%s Structured plan ready in %.1fs (notes=%s)",
+                "%s Requesting structured Java plan (tools=%s, retries=%s)",
                 status_prefix,
-                elapsed,
-                bool(payload.notes),
+                request.tool_names or ["none"],
+                retries,
             )
-            plan_logger.info(
-                "planner_structured_success plan_id=%s elapsed=%.1fs notes=%s",
-                plan_id,
-                elapsed,
-                bool(payload.notes),
+        else:
+            print(
+                f"{status_prefix} Structured planner disabled; using plain-text generation.",
+                flush=True,
             )
-            plan_source = payload.java.strip()
-            raw_response = payload.model_dump()
-            if payload.notes:
-                notes = payload.notes.strip()
+            logger.info("%s Structured planner disabled via configuration; using plain-text generation.", status_prefix)
+        plan_logger.info(
+            "planner_request plan_id=%s tools=%s retries=%s context=%s structured=%s",
+            plan_id,
+            request.tool_names or ["none"],
+            retries,
+            bool(request.context),
+            self._structured_enabled,
+        )
+        prompt_hash = _compute_prompt_hash(messages)
+        _log_llm_request(plan_id, messages, request)
+        if self._structured_enabled:
+            try:
+                payload = self._llm_client.structured_generate(
+                    messages=messages,
+                    response_model=_PlannerToolPayload,
+                    tools=[self._planner_tool_schema],
+                    tool_choice=self._planner_tool_choice,
+                    max_retries=self._structured_max_retries,
+                    log_context={
+                        "logger_name": PLAN_LOGGER_NAME,
+                        "prefix": f"plan_id={plan_id}",
+                        "completion_logger": lambda attempt, completion: _log_structured_attempt_completion(
+                            plan_id,
+                            attempt,
+                            completion,
+                        ),
+                    },
+                )
+            except Exception as exc:  # pragma: no cover - provider dependent
+                elapsed = time.perf_counter() - request_start
+                print(
+                    f"{status_prefix} Structured plan request failed after {elapsed:.1f}s: {exc}",
+                    flush=True,
+                )
+                logger.warning(
+                    "%s Structured plan request failed after %.1fs: %s",
+                    status_prefix,
+                    elapsed,
+                    exc,
+                )
+                plan_logger.warning(
+                    "planner_structured_failure plan_id=%s elapsed=%.1fs error=%s",
+                    plan_id,
+                    elapsed,
+                    exc,
+                )
+                _log_structured_failure_details(plan_id, exc)
+                friendly = _summarize_structured_failure(exc)
+                if friendly:
+                    logger.warning("%s Falling back to plain-text parsing.", friendly)
+                    plan_logger.warning(
+                        "planner_structured_reason plan_id=%s detail=%s",
+                        plan_id,
+                        friendly,
+                    )
+                else:
+                    logger.warning(
+                        "Structured Java plan generation failed; attempting plain-text fallback.",
+                        exc_info=exc,
+                    )
+                plan_logger.info("planner_plain_fallback plan_id=%s", plan_id)
+                failure_reason = friendly or str(exc)
+                plan_source, raw_response, notes = self._generate_plain_plan(
+                    messages,
+                    plan_id=plan_id,
+                    failure_reason=failure_reason,
+                )
+            else:
+                elapsed = time.perf_counter() - request_start
+                print(
+                    f"{status_prefix} Structured plan ready in {elapsed:.1f}s (notes={bool(payload.notes)})",
+                    flush=True,
+                )
+                logger.info(
+                    "%s Structured plan ready in %.1fs (notes=%s)",
+                    status_prefix,
+                    elapsed,
+                    bool(payload.notes),
+                )
+                plan_logger.info(
+                    "planner_structured_success plan_id=%s elapsed=%.1fs notes=%s",
+                    plan_id,
+                    elapsed,
+                    bool(payload.notes),
+                )
+                plan_source = payload.java.strip()
+                raw_response = payload.model_dump()
+                if payload.notes:
+                    notes = payload.notes.strip()
+        else:
+            plan_logger.info("planner_plain_fallback plan_id=%s reason=structured_disabled", plan_id)
+            plan_source, raw_response, notes = self._generate_plain_plan(
+                messages,
+                plan_id=plan_id,
+                failure_reason="Structured planner disabled",
+            )
 
         metadata = dict(request.metadata)
         metadata.setdefault("allowed_tools", sorted(request.tool_names))
@@ -1208,6 +1329,7 @@ class JavaPlanner:
             " It should consist of a single main method calls at most seven other functions."
             " The only helper classes available are those provided in the PlanningToolsStub code."
             " These functions can be called directly to perform specific subtasks. Do not invent new APIs."
+            " Provide concrete method bodies—do not return ellipses (...), placeholders, or empty classes."
             " If the problem cannot be solved directly with the available tools, stub out the functions called with comments, indicating what they should do."
         )
         schema_guidance = textwrap.dedent(
@@ -1223,16 +1345,6 @@ class JavaPlanner:
         message = (
             f"{header}\n\n{schema_guidance}\n\n"
         ).strip()
-
-        if tool_names:
-            summary_payload = {
-                "available_tools": sorted(tool_names),
-                "tool_stub_class": tool_stub_class_name or "PlanningToolStubs",
-            }
-            tool_metadata = json.dumps(summary_payload, ensure_ascii=False, indent=2)
-            message = (
-                f"{message}\n\nMachine-readable tool summary:\n{tool_metadata}"
-            ).strip()
 
         if tool_stub_source:
             stub_intro = [
@@ -1265,12 +1377,6 @@ class JavaPlanner:
         lines.append("Task:")
         lines.append(textwrap.dedent(request.task).strip())
         lines.append("")
-
-        if request.goals:
-            lines.append("Goals:")
-            for idx, goal in enumerate(request.goals, start=1):
-                lines.append(f"{idx}. {goal}")
-            lines.append("")
 
         if request.context:
             lines.append("Context:")
@@ -1308,8 +1414,7 @@ class JavaPlanner:
             lines.append("")
 
         lines.append(
-            "Output requirements: respond with only the Java source, preferably via the"
-            f" {_PLANNER_TOOL_NAME} function when tool calls are supported."
+            "Output requirements: respond with only the Java source."
         )
         return "\n".join(lines).strip()
 

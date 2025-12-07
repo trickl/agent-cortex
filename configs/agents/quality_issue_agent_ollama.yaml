@@ -9,61 +9,25 @@ agent:
     provider: ollama
     model: qwen2.5-coder:7b
     base_url: "${OLLAMA_BASE_URL:-http://localhost:11434}"
-    request_timeout: 180
-    temperature: 0.2
-    max_output_tokens: 1500
-    require_tool_support: false
-  workflow:
-    plan_max_retries: 0
-    reflect_every_n_steps: 5
-    allow_parallel_tools: false
   base_context:
-    system_prompt: |-
-      You are "Argus", a senior software engineer whose specialty is improving code
-      quality by addressing Qlty issues. You:
-        • Read issues from the Qlty API and summarise their intent.
-        • Inspect and edit repository files to implement fixes that satisfy the
-          issue requirements while preserving existing behaviour.
-        • Generate concise, descriptive git commit messages and short PR bodies.
-        • Explain trade-offs and call out any assumptions or manual follow-ups.
-        • Reuse a single local checkout inside the directory provided by the
-          PROJECT_REPO_ROOT environment variable. When cloning, always set the
-          git_clone_repository destination to a subdirectory of that root and
-          continue working inside that checkout for the remainder of the task
-          instead of recloning.
-        • Clone the repository's default branch first (use the configured
-          ``default_branch`` parameter and assume "main" when it is not
-          provided). Do not request a feature branch during clone.
-        • Record the ``path`` returned by ``git_clone_repository`` as your
-          canonical ``repo_path`` (e.g., "Cloned into /work/agent/foo; storing
-          repo_path=/work/agent/foo"). Reference this exact value every time a
-          git tool is invoked; do not invent or omit it.
-        • After each sub-goal (and any major tool sequence), ask yourself two
-          questions before deciding what to do next:
-            1. "Given the current evidence, have I achieved the end user goal?"
-            2. "Given the same evidence, am I blocked because I'm missing
-               information or have retried the same approach unsuccessfully?"
-          Only finish once you can confidently answer #1 (success) or #2 (clear
-          blocker). Otherwise, proceed immediately to the next required goal.
-        • Keep reusing the stored ``repo_path`` for all subsequent git tools
-          (``git_switch_branch``, ``git_stage_paths``, etc.). If a git tool ever
-          reports that ``repo_path`` is missing, immediately re-issue the call
-          with the recorded path instead of moving on.
-        • Prefer reusing existing working directories when repeating steps; only
-          reclone when the workspace is corrupted beyond repair.
-        • Do not begin cloning, branching, or editing until you have a specific
-          Qlty issue ID to fix. Treat the single-issue query as the source of
-          truth for what needs work.
-        • When Qlty reports that no issues match the filters, immediately tell
-          the user (e.g., "No lint issues are currently open for owner/project")
-          and stop instead of running git or test actions. Wait for the next
-          instruction after sharing that update.
-        • Build branch names from the Qlty issue slug/id (``fix/issue-<slug>``).
-          If that branch already exists, append a numeric suffix until the name
-          is unique before creating/checking it out.
-        • Narrate each major action (clone path, branch creation, test commands,
-          etc.) so logs provide insight into progress.
-
+    user_prompt: |-
+      You are to retrieve issues from the Qlty platform and fix them
+      autonomously by editing the relevant GitHub repository. You must break down
+      the overall task into a series of sub-goals and use the available tools to
+      achieve each sub-goal. Your plan should be:
+        1) Read open issues from the Qlty API.
+        2) Work on the first issue returned by Qlty, if availble or terminate early if none.
+        3) Check out the relevant code from GitHub.
+        4) Create a unique branch to address the issue.
+        5) Diagnose the root cause of the issue by inspecting the relevant code.
+        6) Propose and apply code changes to fix the issue.
+        7) Run relevant tests to ensure correctness.
+        8) Refine the code to ensure it compiles and passes tests.
+        9) Repeat the code refinement until the issue is resolved.
+        10) Stage and commit the changes with a descriptive commit message.
+        11) Push the branch to GitHub.
+        12) Create a pull request on GitHub with a concise description of the
+            changes made.
       Operating constraints:
         • Never delete code unless it is dead or superseded.
         • Prefer incremental refactors over rewrites.
@@ -71,46 +35,6 @@ agent:
         • Keep explanations under 200 words unless otherwise requested.
         • Honour repository hygiene: stage only the intended files, ensure
           branches follow the provided prefix, and surface the final PR URL.
-  goals:
-    - description: "Continuously evaluate completion and blockers."
-      priority: 6
-      instructions:
-        - "After every sub-goal result, explicitly state whether the overall lint fix objective is: (a) complete, (b) blocked, or (c) still in progress."
-        - "If complete, transition into finalize/delivery steps and craft the closing summary."
-        - "If blocked, document the evidence (attempted tools, errors, missing info) and explain why another attempt is unlikely to succeed before ending."
-        - "If still in progress, immediately determine the next sub-goal or tool needed; do not end the conversation mid-pipeline."
-    - description: "Identify the next lint issue to fix."
-      priority: 5
-      instructions:
-        - "Call qlty_get_first_issue with the configured owner/project filters before any git work."
-        - "Record the returned issue packet (id, slug, summary, candidate files, lint rule)."
-        - "If no issue is returned, report that outcome and stop."
-        - "When an issue is returned, note explicitly that additional goals remain and transition straight into workspace preparation."
-    - description: "Prepare a clean workspace with an active feature branch."
-      priority: 4
-      instructions:
-        - "Clone (or reuse) the repository via git_clone_repository using the repository URL, default branch, and issue reference."
-        - "Persist the repo_path returned by git_clone_repository (or reuse checkout discovery) and reuse it for all git/file actions."
-        - "Create or reuse a branch prefixed with working_branch_prefix via git_create_branch or git_switch_branch before continuing."
-        - "After summarizing the workspace prep, confirm that understand/patch/finalize steps are still outstanding and continue unless a blocker was declared."
-    - description: "Understand the lint issue."
-      priority: 3
-      instructions:
-        - "Use read-focused tools (list_directory, read_text_file, search_text_in_repository, etc.) with repo_path, issue metadata, candidate files, and lint rule."
-        - "Summarize the diagnosis (files, lines, root cause) in your own words for the user."
-        - "Explicitly state whether the diagnosis enables patching; if yes, proceed to the patch goal; if not, explain what extra info is needed before considering termination."
-    - description: "Implement and verify the fix."
-      priority: 2
-      instructions:
-        - "Apply the fix directly with the editing tools (apply_text_rewrite, overwrite_text_file, etc.) using repo_path plus the diagnosis summary."
-        - "Capture applied changes and test output so they can be referenced in commits/PRs."
-        - "After patching/tests, decide whether the issue is resolved. If yes, move directly to finalize; if no, describe the blocker and retry/exit according to the top-level termination goal."
-    - description: "Finalize delivery with commit, tests evidence, and PR summary."
-      priority: 1
-      instructions:
-        - "Stage any remaining files, craft the commit, push, and (optionally) open a PR using the git toolchain (git_stage_paths, git_commit_changes, git_push_branch, git_create_pull_request)."
-        - "Report commit SHA, branch, and tests/pr status back to the user."
-        - "Only now (or after declaring an unrecoverable blocker) produce the final user-facing message." 
   environment:
     repo_root_env_var: PROJECT_REPO_ROOT
     default_repo_root: .
@@ -122,28 +46,10 @@ agent:
       include:
         - git
         - file_system
-        - qlty_single_issue
-      match_all: false
-    explicit:
-      - git_clone_repository
-      - git_create_branch
-      - git_switch_branch
-      - git_stage_paths
-      - git_commit_changes
-      - git_get_uncommitted_changes
-      - git_push_branch
-      - git_create_pull_request
-      - list_files_in_tree
-      - read_text_file
-      - overwrite_text_file
-      - apply_text_rewrite
-      - qlty_get_first_issue
+        - qlty
   parameters:
     default_branch: main
     working_branch_prefix: fix/issue-
-    allow_force_push: false
-    max_files_per_commit: 25
-    dry_run: false
   secrets:
     github_token_env_var: GITHUB_TOKEN
     qlty_token_env_var: QLTY_API_TOKEN

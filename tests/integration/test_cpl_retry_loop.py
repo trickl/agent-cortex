@@ -63,7 +63,7 @@ def test_java_retry_loop_end_to_end():
     }
 
     llm = SequenceLLMClient([first_plan_missing_main, second_plan_succeeds])
-    planner = JavaPlanner(llm, specification="SPEC")
+    planner = JavaPlanner(llm, specification="SPEC", structured_enabled=True)
     orchestrator = PlanOrchestrator(
         planner,
         runner_factory=lambda: PlanRunner(
