@@ -7,7 +7,7 @@ import re
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -25,6 +25,11 @@ _NOTES_MARKERS: Tuple[Tuple[str, Optional[str]], ...] = (
     ("NOTES:", None),
 )
 _DEFAULT_CONTEXT_LINES = 3
+_PLAN_CLASS_PATTERN = re.compile(r"(?:class|interface)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)")
+_HUNK_HEADER_PATTERN = re.compile(
+    r"@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@"
+)
+_ERROR_LINE_WINDOW = 5
 _DIAGNOSTIC_PREFIXES = (
     "^",
     "symbol:",
@@ -38,6 +43,17 @@ _DIAGNOSTIC_PATTERNS = (
     re.compile(r"[A-Za-z0-9_./\\-]+\.(java|kt|scala):\d+:"),
     re.compile(r"\.java:\d+:\s*(error|warning|note|symbol|location)\b", re.IGNORECASE),
 )
+_SKIPPED_PATCH_LOG = "patch_skipped.log"
+
+
+@dataclass
+class _DiffSnippet:
+    file_path: str
+    content: str
+    old_start: Optional[int]
+    old_count: Optional[int]
+    new_start: Optional[int]
+    new_count: Optional[int]
 
 STRICT_UNIFIED_DIFF_SPEC = textwrap.dedent(
     """
@@ -291,7 +307,13 @@ class JavaPlanFixer:
                 iteration_dir,
                 serialized,
             )
-        return self._request_patch_text(messages, plan_source, request, iteration_dir)
+        return self._request_patch_text(
+            messages,
+            plan_source,
+            request,
+            iteration_dir,
+            compile_result.errors,
+        )
 
     def _request_patch_text(
         self,
@@ -299,9 +321,14 @@ class JavaPlanFixer:
         plan_source: str,
         request: PlanFixerRequest,
         iteration_dir: Path,
+        compile_errors: Sequence[CompilationError],
     ) -> Tuple[List[_ContextPatch], Optional[str], str]:
         plan_logger = self._get_plan_logger()
         llm_logger = self._get_llm_logger()
+        plan_filename = self._plan_file_basename(plan_source)
+        allowed_files = {plan_filename}
+        line_windows = self._build_error_windows(compile_errors, plan_filename)
+        skip_callback = lambda reason: self._record_patch_skip(iteration_dir, reason)
         last_error: Optional[Exception] = None
         for request_attempt in range(1, self._max_fix_request_attempts + 1):
             try:
@@ -332,7 +359,13 @@ class JavaPlanFixer:
                         content,
                     )
                 try:
-                    patches, notes = self._parse_patch_text(content, plan_source)
+                    patches, notes = self._parse_patch_text(
+                        content,
+                        plan_source,
+                        allowed_filenames=allowed_files,
+                        line_windows=line_windows,
+                        skip_callback=skip_callback,
+                    )
                     return patches, notes, content
                 except ValueError as exc:
                     last_error = exc
@@ -351,14 +384,15 @@ class JavaPlanFixer:
         request: PlanFixerRequest,
         compile_result: JavaCompilationResult,
     ) -> List[dict]:
-        system_prompt = self._build_system_prompt(request)
+        system_prompt = self._build_system_prompt(request, plan_source)
         user_prompt = self._build_user_prompt(plan_source, request, compile_result)
         return [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
 
-    def _build_system_prompt(self, request: PlanFixerRequest) -> str:
+    def _build_system_prompt(self, request: PlanFixerRequest, plan_source: str) -> str:
+        plan_filename = self._plan_file_basename(plan_source)
         if request.tool_stub_source:
             stub_clause = "Use only the provided planning tool stubs; never invent additional helper classes."
         else:
@@ -369,6 +403,8 @@ class JavaPlanFixer:
                 "You repair a single Java class that orchestrates planning tools.",
                 "Given the previous plan and the Java compiler diagnostics, produce localized contextual patches rather than rewriting the entire file.",
                 stub_clause,
+                f"Only edit {plan_filename}; never modify PlanningToolStubs.java or any other files, even if diagnostics mention them.",
+                "Address diagnostics sequentially and emit at most one focused hunk per compiler error (resolve them in the order provided).",
                 "Contexts must quote existing lines exactly as they already appear in the file (indentation, punctuation, and newline characters included). Never invent context from the desired replacement.",
                 "Always include at least two unchanged lines at the top and bottom of each patch whenever they exist (use fewer only at file boundaries). Keep those boundary lines identical to the current file; only the interior lines should change.",
                 "Preserve helper structure and minimize unrelated edits.",
@@ -418,6 +454,9 @@ class JavaPlanFixer:
             sections.append(
                 "Existing plan already imports PlanningToolStubs. Continue to use the same static helpers."
             )
+        sections.append(
+            "Fix strategy:\n- Tackle the diagnostics in the order shown above.\n- Emit the smallest possible diff that resolves the current diagnostic before moving on.\n- Do not modify PlanningToolStubs or create additional helper files."
+        )
         sections.append(
             "Requirements:\n- Keep the class self-contained.\n- Only adjust code necessary to resolve the diagnostics.\n- Maintain all PlanningToolStubs.<name>(...) calls.\n- Prefer the smallest number of focused patches.\n- Provide at least two unchanged lines above and below each edit whenever possible (use fewer only at file boundaries).\n- At the start of the file, include the first available unchanged lines after the edit; at the end of the file, include the preceding unchanged lines."
         )
@@ -501,6 +540,64 @@ class JavaPlanFixer:
         response_path.write_text(raw_text.rstrip() + "\n", encoding="utf-8")
         diff_sections = self._split_unified_diff_sections(raw_text)
         self._persist_pretty_patch_text(iteration_dir, diff_sections)
+
+    @staticmethod
+    def _plan_file_basename(plan_source: str) -> str:
+        match = _PLAN_CLASS_PATTERN.search(plan_source)
+        if not match:
+            raise ValueError("Unable to determine planner class name from source.")
+        return f"{match.group('name')}.java"
+
+    @staticmethod
+    def _snippet_line_range(snippet: _DiffSnippet) -> Optional[Tuple[int, int]]:
+        start: Optional[int]
+        count: Optional[int]
+        if snippet.new_start is not None and snippet.new_count is not None and snippet.new_count > 0:
+            start = snippet.new_start
+            count = snippet.new_count
+        elif snippet.old_start is not None and snippet.old_count is not None and snippet.old_count > 0:
+            start = snippet.old_start
+            count = snippet.old_count
+        else:
+            return None
+        end = start + max(count - 1, 0)
+        return start, end
+
+    @staticmethod
+    def _range_overlaps(snippet_range: Tuple[int, int], windows: Sequence[Tuple[int, int]]) -> bool:
+        start, end = snippet_range
+        for window_start, window_end in windows:
+            if end < window_start or start > window_end:
+                continue
+            return True
+        return False
+
+    def _build_error_windows(
+        self,
+        errors: Sequence[CompilationError],
+        plan_filename: str,
+    ) -> List[Tuple[int, int]]:
+        windows: List[Tuple[int, int]] = []
+        for error in errors:
+            if error.file and Path(error.file).name != plan_filename:
+                continue
+            if error.line is None:
+                continue
+            start = max(1, int(error.line) - _ERROR_LINE_WINDOW)
+            end = int(error.line) + _ERROR_LINE_WINDOW
+            windows.append((start, end))
+        return windows
+
+    def _record_patch_skip(self, iteration_dir: Path, reason: str) -> None:
+        clean_reason = reason.strip()
+        if not clean_reason:
+            return
+        iteration_dir.mkdir(parents=True, exist_ok=True)
+        log_path = iteration_dir / _SKIPPED_PATCH_LOG
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(clean_reason + "\n")
+        plan_logger = self._get_plan_logger()
+        plan_logger.info("plan_fixer_patch_skipped dir=%s reason=%s", iteration_dir, clean_reason)
 
     @staticmethod
     def _apply_contextual_patches(plan_source: str, patches: Sequence[_ContextPatch]) -> str:
@@ -613,7 +710,15 @@ class JavaPlanFixer:
             return ""
         return str(response)
 
-    def _parse_patch_text(self, raw_text: str, plan_source: str) -> Tuple[List[_ContextPatch], Optional[str]]:
+    def _parse_patch_text(
+        self,
+        raw_text: str,
+        plan_source: str,
+        *,
+        allowed_filenames: Optional[Set[str]] = None,
+        line_windows: Optional[List[Tuple[int, int]]] = None,
+        skip_callback: Optional[Callable[[str], None]] = None,
+    ) -> Tuple[List[_ContextPatch], Optional[str]]:
         text = (raw_text or "").strip()
         if not text:
             raise ValueError("LLM response did not contain patch text.")
@@ -626,7 +731,31 @@ class JavaPlanFixer:
         for chunk in diff_sections:
             snippets = self._diff_chunk_to_snippets(chunk)
             for snippet in snippets:
-                patches.append(self._contextualize_patch_block(snippet, normalized_plan))
+                if allowed_filenames:
+                    base_name = Path(snippet.file_path).name
+                    if base_name not in allowed_filenames:
+                        if skip_callback:
+                            skip_callback(
+                                f"Skipped diff hunk for '{snippet.file_path}' (not in allowed files: {sorted(allowed_filenames)})."
+                            )
+                        continue
+                if line_windows:
+                    snippet_range = self._snippet_line_range(snippet)
+                    if snippet_range and not self._range_overlaps(snippet_range, line_windows):
+                        if skip_callback:
+                            skip_callback(
+                                f"Skipped diff hunk for '{snippet.file_path}' lines {snippet_range[0]}-{snippet_range[1]} (outside diagnostics)."
+                            )
+                        continue
+                try:
+                    patches.append(self._contextualize_patch_block(snippet.content, normalized_plan))
+                except ValueError as exc:
+                    if skip_callback:
+                        skip_callback(
+                            f"Skipped diff hunk for '{snippet.file_path}' because contextualization failed: {exc}."
+                        )
+        if not patches:
+            raise ValueError("LLM diff did not produce any usable planner patches.")
         return patches, notes
 
     def _split_notes(self, text: str) -> Tuple[str, Optional[str]]:
@@ -684,7 +813,16 @@ class JavaPlanFixer:
             return True
         return any(pattern.search(stripped) for pattern in _DIAGNOSTIC_PATTERNS)
 
-    def _diff_chunk_to_snippets(self, chunk: str) -> List[str]:
+    @staticmethod
+    def _normalize_diff_path(path: str) -> str:
+        value = (path or "").strip()
+        if value.startswith("a/") or value.startswith("b/"):
+            value = value[2:]
+        if value.startswith("./"):
+            value = value[2:]
+        return value
+
+    def _diff_chunk_to_snippets(self, chunk: str) -> List[_DiffSnippet]:
         text = self._normalize_patch_text(chunk.strip())
         if not text:
             raise ValueError("Patch chunk was empty.")
@@ -697,15 +835,22 @@ class JavaPlanFixer:
             index += 1
         if index == len(lines) or not lines[index].startswith("--- "):
             raise ValueError("Unified diff chunk must start with a '--- <old filename>' line.")
+        old_path = self._normalize_diff_path(lines[index][4:])
         index += 1
         while index < len(lines) and not lines[index].strip():
             index += 1
         if index == len(lines) or not lines[index].startswith("+++ "):
             raise ValueError("Unified diff chunk must include a '+++ <new filename>' line after the old filename.")
+        new_path = self._normalize_diff_path(lines[index][4:])
         index += 1
-        snippets: List[str] = []
+        file_path = new_path if new_path and new_path != "/dev/null" else old_path
+        snippets: List[_DiffSnippet] = []
         snippet_lines: List[str] = []
         saw_hunk = False
+        current_old_start: Optional[int] = None
+        current_old_count: Optional[int] = None
+        current_new_start: Optional[int] = None
+        current_new_count: Optional[int] = None
         for raw_line in lines[index:]:
             if not raw_line:
                 continue
@@ -713,9 +858,24 @@ class JavaPlanFixer:
                 if snippet_lines:
                     snippet = "\n".join(snippet_lines).rstrip("\n") + "\n"
                     if snippet.strip():
-                        snippets.append(snippet)
+                        snippets.append(
+                            _DiffSnippet(
+                                file_path=file_path,
+                                content=snippet,
+                                old_start=current_old_start,
+                                old_count=current_old_count,
+                                new_start=current_new_start,
+                                new_count=current_new_count,
+                            )
+                        )
                     snippet_lines = []
                 saw_hunk = True
+                (
+                    current_old_start,
+                    current_old_count,
+                    current_new_start,
+                    current_new_count,
+                ) = self._parse_hunk_header(raw_line)
                 continue
             if not saw_hunk:
                 raise ValueError("Unified diff chunk missing @@ header before diff body.")
@@ -733,12 +893,36 @@ class JavaPlanFixer:
         if snippet_lines:
             snippet = "\n".join(snippet_lines).rstrip("\n") + "\n"
             if snippet.strip():
-                snippets.append(snippet)
+                snippets.append(
+                    _DiffSnippet(
+                        file_path=file_path,
+                        content=snippet,
+                        old_start=current_old_start,
+                        old_count=current_old_count,
+                        new_start=current_new_start,
+                        new_count=current_new_count,
+                    )
+                )
         if not saw_hunk:
             raise ValueError("Unified diff chunk missing @@ header before diff body.")
         if not snippets:
             raise ValueError("Unified diff chunk did not produce any replacement snippets.")
         return snippets
+
+    @staticmethod
+    def _parse_hunk_header(line: str) -> Tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
+        match = _HUNK_HEADER_PATTERN.match(line.strip())
+        if not match:
+            raise ValueError("Invalid unified diff hunk header.")
+
+        def _to_int(value: Optional[str]) -> int:
+            return int(value) if value is not None else 1
+
+        old_start = int(match.group("old_start")) if match.group("old_start") else None
+        old_count = _to_int(match.group("old_count")) if match.group("old_start") else None
+        new_start = int(match.group("new_start")) if match.group("new_start") else None
+        new_count = _to_int(match.group("new_count")) if match.group("new_start") else None
+        return old_start, old_count, new_start, new_count
 
     def _contextualize_patch_block(self, block: str, normalized_plan: str) -> _ContextPatch:
         normalized_block = self._normalize_patch_text(block.strip("\n"))

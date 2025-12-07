@@ -92,6 +92,18 @@ def _leading_addition_patch_text() -> str:
     )
 
 
+def _foreign_file_patch_text() -> str:
+    return "\n".join(
+        [
+            "--- a/Other.java",
+            "+++ b/Other.java",
+            "@@ -1,1 +1,1 @@",
+            "-public class Other {}",
+            "+public class Other { void run() {} }",
+        ]
+    )
+
+
 class PlainLLMClient:
     def __init__(self, response_text: str):
         self.response_text = response_text
@@ -353,13 +365,45 @@ def test_diff_chunk_to_snippets_handles_multiple_hunks():
     fixer = JavaPlanFixer(PlainLLMClient(_patch_text()))
     snippets = fixer._diff_chunk_to_snippets(_multi_hunk_patch_text())
     assert len(snippets) == 2
-    assert any("Added by test" in snippet for snippet in snippets)
+    assert any("Added by test" in snippet.content for snippet in snippets)
 
 
 def test_parse_patch_handles_leading_additions():
     fixer = JavaPlanFixer(PlainLLMClient(_leading_addition_patch_text()))
-    patches, _ = fixer._parse_patch_text(_leading_addition_patch_text(), BROKEN_PLAN)
+    patches, _ = fixer._parse_patch_text(
+        _leading_addition_patch_text(),
+        BROKEN_PLAN,
+        allowed_filenames={"Planner.java"},
+    )
     assert patches
     first_patch = patches[0]
     assert first_patch.before_context != ""
     assert "public class Planner" in first_patch.replacement_code
+
+
+def test_parse_patch_skips_unexpected_files():
+    fixer = JavaPlanFixer(PlainLLMClient(_foreign_file_patch_text()))
+    skips: List[str] = []
+    with pytest.raises(ValueError):
+        fixer._parse_patch_text(
+            _foreign_file_patch_text(),
+            BROKEN_PLAN,
+            allowed_filenames={"Planner.java"},
+            skip_callback=skips.append,
+        )
+    assert skips
+    assert any("not in allowed files" in reason for reason in skips)
+
+
+def test_parse_patch_respects_diagnostic_windows():
+    fixer = JavaPlanFixer(PlainLLMClient(_patch_text()))
+    skips: List[str] = []
+    with pytest.raises(ValueError):
+        fixer._parse_patch_text(
+            _patch_text(),
+            BROKEN_PLAN,
+            allowed_filenames={"Planner.java"},
+            line_windows=[(50, 60)],
+            skip_callback=skips.append,
+        )
+    assert any("outside diagnostics" in reason for reason in skips)
